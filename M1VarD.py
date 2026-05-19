@@ -12,7 +12,7 @@ from cartopy import crs as ccrs
 from palettable import scientific as scm
 # from sympy import cot
 from math import pi
-from sympy import linsolve, symbols
+from sympy import linsolve, symbols, Matrix
 
 #######################################
 """
@@ -252,59 +252,8 @@ K = E*T_e/(1-nu**2)
 xi = Re**2*K/D
 eta = xi/(1+xi)
 
-w_lm = np.zeros(shape)
-F_lm = np.zeros(shape)
-
-Lapl2 = Lapl + 2
-
-for l in range(2, lmax+1):
-    dp = Lapl2[l]
-    dl = Lapl[l]
-    
-    M11 = D * (dp**2)
-    M12 = R * dp
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Re3 = Re**3
-# Re4 = Re**4
-
-# Lapl2 = Lapl + 2
-# Lapl2_sq = (Lapl+2) * (Lapl+2)
-
-# for l in range(1, lmax+1):
-#     w_lm, F_lm = symbols(" w_lm F_lm ")
-
-#     System = [# Eq 1, wlm
-#               (-Re4 * g0 * rho_l * topo_clm.coeffs
-#                - eta * Re3 * Lapl2[l])
-#               /
-#               (eta * D * Lapl2_sq[l]
-#               - (1-nu) * eta * D * Lapl2[l]
-#               + Re4 * g0 * (rho_m - rho_c)) 
-#               * F_lm,
-              
-#               # Eq 2, Flm
-#               ( (E*T_e/Re)
-#                * Lapl2[l] )
-#               /
-#               (Lapl2_sq[l] - (1+nu)*Lapl2[l])
-#               * w_lm
-#               ]
-
-# linsolve(System, w_lm, F_lm)
-
+# eqs 86 and 87 of Beuthe
+# HOW DO I DO THIS?
 
 
 
@@ -493,7 +442,7 @@ def plot_derivatives(par_coeffs, par):
 (dw1, dw1_theta_coeffs, dw1_phi_coeffs, 
  dw2_theta2, dw2_phi2, dw2_thetaphi) = get_derivatives(wlm_coeffs)
 
-(dw1_array, dw1_theta_array, dw1_phi_array, dw2_theta2_array, 
+(w_array, dw1_theta_array, dw1_phi_array, dw2_theta2_array, 
         dw2_phi2_array, dw2_thetaphi_array) = derivative_arrays(wlm_coeffs)
 
 # plot_derivatives(wlm_coeffs, 'w')        # Plot derivatives of w
@@ -503,7 +452,7 @@ def plot_derivatives(par_coeffs, par):
 (dF1, dF1_theta_coeffs, dF1_phi_coeffs, 
  dF2_theta2, dF2_phi2, dF2_thetaphi) = get_derivatives(Flm_coeffs)
 
-(dF1_array, dF1_theta_array, dF1_phi_array, dF2_theta2_array, 
+(F_array, dF1_theta_array, dF1_phi_array, dF2_theta2_array, 
         dF2_phi2_array, dF2_thetaphi_array) = derivative_arrays(Flm_coeffs)
 
 # plot_derivatives(Flm_coeffs, 'F')        # Plot derivatives of F
@@ -513,7 +462,7 @@ def plot_derivatives(par_coeffs, par):
 (dD1, dD1_theta_coeffs, dD1_phi_coeffs, 
  dD2_theta2, dD2_phi2, dD2_thetaphi) = get_derivatives(Dlm_coeffs)
 
-(dD1_array, dD1_theta_array, dD1_phi_array, dD2_theta2_array, 
+(D_array, dD1_theta_array, dD1_phi_array, dD2_theta2_array, 
         dD2_phi2_array, dD2_thetaphi_array) = derivative_arrays(Dlm_coeffs)
 
 # plot_derivatives(Dlm_coeffs, 'D')        # Plot derivatives of D
@@ -523,7 +472,7 @@ def plot_derivatives(par_coeffs, par):
 (da1, da1_theta_coeffs, da1_phi_coeffs, 
  da2_theta2, da2_phi2, da2_thetaphi) = get_derivatives(alm_coeffs)
 
-(da1_array, da1_theta_array, da1_phi_array, da2_theta2_array, 
+(a_array, da1_theta_array, da1_phi_array, da2_theta2_array, 
         da2_phi2_array, da2_thetaphi_array) = derivative_arrays(alm_coeffs)
 
 # plot_derivatives(alm_coeffs, 'a')        # Plot derivatives of a
@@ -533,60 +482,61 @@ def plot_derivatives(par_coeffs, par):
 
 
 
-# ### OPERATOR A ###
-# A_Dw = np.zeros([2*(lmax+1)+1, 4*(lmax+1)+1])
-
-# rad_angle_theta = pi/(2*lmax)
-# rad_angle_phi = pi/(2*lmax)
-
-# for theta in range(2*(lmax+1)+1):
-#     for phi in range(4*(lmax+1)+1):
-#         if theta != 0:
-#           A_Dw[theta,phi] = (
-#                         (dD2_theta2_array[theta,phi] + D_array[theta,phi]) 
-#                         * (csc2(theta*rad_angle_theta) * dw2_phi2_array[theta,phi] 
-#                         + cot(theta*rad_angle_theta) * dw_theta_array[theta,phi]
-#                         + w_array[theta,phi])
-                        
-#                         + (csc2(theta*rad_angle_theta) * dD2_phi2_array[theta,phi] 
-#                         + cot(theta*rad_angle_theta) * dD_theta_array[theta,phi]
-#                         + D_array[theta,phi])
-                        
-#                         - 2*csc2(theta*rad_angle_theta)
-#                         * (dD2_thetaphi_array[theta,phi] 
-#                            - cot(theta*rad_angle_theta)*dD_theta_array[theta,phi])
-#                         * (dw2_thetaphi_array[theta,phi] 
-#                            - cot(theta*rad_angle_theta)*dw_theta_array[theta,phi])
-#                         )
-#         else:
-#             # Prevent error at the pole
-#             A_Dw[theta,phi] = 1
-
-# print(rad_angle_theta*2*(lmax+1)+1)
 
 
+### OPERATOR A (VECTORIZED) ###
+# Create grids for theta values
+# pyshtools grids are usually (lmax+1, 2*lmax+1) or (2*lmax+1, 4*lmax+1)
+# Make sure your rad_angle_theta matches your grid's latitude array
+thetas = wlm_coeffs.expand().lats() * (np.pi / 180) # Convert to radians
+theta_grid, _ = np.meshgrid(thetas, np.zeros(dw2_phi2_array.shape[1]))
+theta_grid = theta_grid.T # Shape must match your data arrays
 
-# ### OPERATOR A (VECTORIZED) ###
-# # Create grids for theta values
-# # pyshtools grids are usually (lmax+1, 2*lmax+1) or (2*lmax+1, 4*lmax+1)
-# # Make sure your rad_angle_theta matches your grid's latitude array
-# thetas = wlm_coeffs.expand().lats() * (np.pi / 180) # Convert to radians
-# theta_grid, _ = np.meshgrid(thetas, np.zeros(dw2_phi2_array.shape[1]))
-# theta_grid = theta_grid.T # Shape must match your data arrays
+def cot(x): return np.where(np.isclose(np.sin(x), 0), 0, 1.0 / np.tan(x))
+def csc2(x): return np.where(np.isclose(np.sin(x), 0), 1.0, 1.0 / (np.sin(x)**2))
 
-# def cot(x): return np.where(np.isclose(np.sin(x), 0), 0, 1.0 / np.tan(x))
-# def csc2(x): return np.where(np.isclose(np.sin(x), 0), 1.0, 1.0 / (np.sin(x)**2))
+# Vectorized Operator A
+C2 = csc2(theta_grid)
+CT = cot(theta_grid)
 
-# # Vectorized Operator A
-# C2 = csc2(theta_grid)
-# CT = cot(theta_grid)
-
-# A_Dw = (
-#     (dD2_theta2_array + D_array) * (C2 * dw2_phi2_array + CT * dw_theta_array + w_array)
-#     + (C2 * dD2_phi2_array + CT * dD_theta_array + D_array) # Add indexing if necessary
-#     - 2 * C2 * (dD2_thetaphi_array - CT * dD_theta_array) * (dw2_thetaphi_array - CT * dw_theta_array)
-# )
-
-# A_Dw_lm = pysh.SHGrid.from_array((1-nu)*A_Dw).expand()
+A_Dw = (
+    (dD2_theta2_array + D_array) * (C2 * dw2_phi2_array + CT * dw1_theta_array + w_array)
+    + (C2 * dD2_phi2_array + CT * dD1_theta_array + D_array) * (dw2_theta2_array + w_array) 
+    - 2 * C2 * (dD2_thetaphi_array - CT * dD1_phi_array) * (dw2_thetaphi_array - CT * dw1_phi_array)
+)
+A_aF = (
+    (da2_theta2_array + a_array) * (C2 * dF2_phi2_array + CT * dF1_theta_array + F_array)
+    + (C2 * da2_phi2_array + CT * da1_theta_array + a_array) * (dF2_theta2_array + F_array) 
+    - 2 * C2 * (da2_thetaphi_array - CT * da1_phi_array) * (dF2_thetaphi_array - CT * dF1_phi_array)
+)
 
 
+# Now the term with differential operator A is in SH coefficients
+A_Dw_lm = pysh.SHGrid.from_array((1-nu)*A_Dw).expand()
+A_aF_lm = pysh.SHGrid.from_array((1+nu)*A_aF).expand()
+
+w, F = symbols(' w, F ')
+
+
+for degree in range(2, lmax+1):
+    
+    # Writing the two equations of Beuthe's conclusion now in SH coeffs:
+    # eq1
+    term1_eq1 = ( (Lapl[degree]+2)*Dlm_coeffs.coeffs[: , degree , : degree+1]*(Lapl[degree]+2) 
+                + Re**4 * g0 * (rho_m-rho_c) )                                                      # w-terms
+    term2_eq1 = Re**3 * (Lapl[degree]+2)                                                            # F-terms
+    term3_eq1 = ( -Re**4 *g0 * rho_l * topo_clm.coeffs[: , degree , : degree+1] 
+                + A_Dw_lm.coeffs[: , degree , : degree+1] )                                         # RHS
+    
+    #eq2
+    term1_eq2 = -1/Re * (Lapl[degree]+2)                                                            # w-terms
+    term2_eq2 = (Lapl[degree]+2)*alm_coeffs.coeffs[: , degree , : degree+1]*(Lapl[degree]+2)        # F-terms
+    term3_eq2 = A_aF_lm.coeffs[: , degree , : degree+1]                                             # RHS
+    
+    
+    A = np.array([[term1_eq1, term2_eq1], [term1_eq2, term2_eq2]])
+    b = np.array([[term3_eq1], [term3_eq2]])
+    
+    system = (A,b)
+    
+    linsolve(system, [w, F])
