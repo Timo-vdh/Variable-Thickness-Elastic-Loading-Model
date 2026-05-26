@@ -547,7 +547,7 @@ A_Dw_lm_grid.plot(ax=ax1,
               cmap=mycmap,
               colorbar='right',
               # cb_tick_interval=2,
-              # cmap_limits=[-2e31, 5e31],
+              cmap_limits=[-2e31, 5e31],
               cb_label= 'A_Dw from eq'
               )
 A_Dw_const_grid.plot(ax=ax2,

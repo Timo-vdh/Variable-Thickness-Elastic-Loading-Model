@@ -72,7 +72,7 @@ rho_c = 2900.
 rho_m = 3500.
 rho_l = rho_c
 
-lmax = 3  # Maximum spherical harmonic degree to perform all calculations
+lmax = 10  # Maximum spherical harmonic degree to perform all calculations
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -212,7 +212,7 @@ import sympy as sp
 from sympy.physics.wigner import gaunt
 
 # Set all inputs as symbols (at least for now)
-nu, E, T_e, Re, g0, rho_m, rho_c = sp.symbols('nu E T_e Re g0 rho_m rho_c')
+# nu, E, T_e, Re, g0, rho_m, rho_c = sp.symbols('nu E T_e Re g0 rho_m rho_c')
 
 # Pre-calculate the buoyancy term, as it is independent of degree and order directly
 buoy = (Re/T_e)**3 * Re/E * g0 * (rho_m-rho_c)
@@ -272,17 +272,10 @@ matrix_B = sp.Matrix.zeros(N_modes, N_modes)
 # In the final code, replace these with actual numerical values.
 D = {}
 a = {}
-y_sym = {}
 for L in range(lmax + 1):
     for M in range(-L, L + 1):
         D[(L, M)] = sp.Symbol(f'D_{L}_{M}')
         a[(L, M)] = sp.Symbol(f'alpha_{L}_{M}')
-        y_sym[(L, M)] = sp.Symbol(f'y_sym_{L}_{M}')
-
-# Symbolic definition of the loading function
-y_lm_str_sym = []
-for l, m in mode_map:
-    y_lm_str_sym.append(y_sym[(l, m)])
 
 
 # Calculate topographic loading coefficients y_lm
@@ -299,7 +292,6 @@ alm_str = []
 y_lm_unstr = pysh.shio.SHCilmToVector(y_lm)
 y_lm_str = []
 
-    
 # Map out how the pyshstools array is structured
 def find_custom_element(l, m, xlm_unstr):
     # Find the starting index of degree l in the shtools array (which is l^2)
@@ -398,12 +390,12 @@ for i, (l, m) in enumerate(mode_map):
                 
                 ### Multiply the structural terms together and add to the cell accumulator
                 # IF EVALUATING NUMERICALLY, USE BELOW EQUATION FOR NUMERIC COEFFICIENTS OF D AND ALPHA
-                # cell_sum_A += w_coef * D_val * q_val
-                # cell_sum_B += w_coef * a_val * q_val
+                cell_sum_A += w_coef * D_val * q_val
+                cell_sum_B += w_coef * a_val * q_val
                 
                 # IF EVALUATING SYMBOLICALLY, USE BELOW EQUATION FOR SYMBOLIC COEFFICIENTS OF D AND ALPHA
-                cell_sum_A += w_coef * D[(L,M)] * q_val
-                cell_sum_B += w_coef * a[(L,M)] * q_val
+                # cell_sum_A += w_coef * D[(L,M)] * q_val
+                # cell_sum_B += w_coef * a[(L,M)] * q_val
         
         cell_sum_A = cell_sum_A * scaler_A
         cell_sum_B = cell_sum_B * scaler_B
@@ -447,29 +439,19 @@ print(f"Row (0,0), Col (2,0) Entry Matrix B:\n{matrix_B[0, 6]}\n")
 #################################################
 
 # =============================================================================
-# 5. SYMBOLIC SYSTEM ASSEMBLY & SOLUTION (PURE SYMPY)
+# 5. FIXED SYSTEM ASSEMBLY & SOLUTION
 # =============================================================================
 
 # 1. Create vectors of SymPy symbols for the unknowns matching your mode_map
 w_symbols = []
 F_symbols = []
-y_symbols = []
-
 for (l, m) in mode_map:
     w_symbols.append(sp.Symbol(f'w_{l}_{m}'))
     F_symbols.append(sp.Symbol(f'F_{l}_{m}'))
-    # Optional: If you want loading to be symbolic too, uncomment below:
-    # y_symbols.append(sp.Symbol(f'y_{l}_{m}'))
 
-# Convert list of symbols into formal SymPy Column Vectors (Matrices of size N_modes x 1)
 vec_w = sp.Matrix(w_symbols)
 vec_F = sp.Matrix(F_symbols)
-
-# Using your calculated y_lm array from line 204 as the known symbolic/numeric RHS
 vec_y = sp.Matrix(y_lm_str) 
-# For symbolic definition of the loading
-vec_y = sp.Matrix(y_lm_str_sym) 
-
 
 # 2. Construct the diagonal operator matrices a_l and b_l symbolically
 matrix_a_l = sp.Matrix.zeros(N_modes, N_modes)
@@ -477,46 +459,134 @@ matrix_b_l = sp.Matrix.zeros(N_modes, N_modes)
 
 for i, (l, m) in enumerate(mode_map):
     d_l = -l * (l + 1) + 2
-    
-    # Operator a^l (Eq. A19): (Re/Te)^3 / E * (-l(l+1)+2)
     matrix_a_l[i, i] = (Re / T_e)**3 / E * d_l
-    
-    # Operator b^l (Eq. A20): -1 * (-l(l+1)+2) -> maps F to w
     matrix_b_l[i, i] = -1 * d_l
 
-
 # 3. Assemble the Full Block System Matrix and Right-Hand Side Vector
-# Equation 1: A*w + a_l*F = y
-# Equation 2: b_l*w + B*F = 0
-# Consolidating into: M_system * X_unknowns = RHS
+M_top = matrix_A.row_join(matrix_a_l)     
+M_bottom = matrix_b_l.row_join(matrix_B)  
+M_system = M_top.col_join(M_bottom)       
 
-M_top = matrix_A.row_join(matrix_a_l)     # Left side blocks of Eq 1 & 2
-M_bottom = matrix_b_l.row_join(matrix_B)  # Right side blocks of Eq 1 & 2
-M_system = M_top.col_join(M_bottom)       # Full (2*N_modes) x (2*N_modes) matrix
-
-# Full combined unknowns vector: [w00, ..., wlm, F00, ..., Flm]
 X_unknowns = vec_w.col_join(vec_F)
-
-# Full right-hand side vector: [y00, ..., ylm, 0, ..., 0]
 RHS_vector = vec_y.col_join(sp.Matrix.zeros(N_modes, 1))
 
+print("--- Preparing Mapping Dict for Numeric Fast-Solve ---")
 
-print("--- Solving the Block System Symbolically ---")
-# 4. Run SymPy's linear system solver
-# linsolve returns a finite set containing the tuple of analytical solutions
-symbolic_solution = sp.linsolve((M_system, RHS_vector), list(X_unknowns))
+# 4. Map ALL symbolic placeholders to their concrete numerical counter-parts
+subs_dict = {}
+for idx, (l, m) in enumerate(mode_map):
+    subs_dict[D[(l, m)]] = Dlm_str[idx]
+    subs_dict[a[(l, m)]] = alm_str[idx]
 
-# Extract the raw solution tuple from the set wrapper
-sol_tuple = list(symbolic_solution)[0]
+subs_dict[nu] = 0.25
+subs_dict[E] = 100.0e9
+subs_dict[T_e] = 150e3
+subs_dict[Re] = float(R - 150e3/2)
+subs_dict[g0] = g0
+subs_dict[rho_m] = 3500.
+subs_dict[rho_c] = 2900.
 
-# Split the answers back into individual arrays corresponding to w and F fields
-w_sol_symbolic = sol_tuple[:N_modes]
-F_sol_symbolic = sol_tuple[N_modes:]
+# Collapse system to pure float decimals
+print("Collapsing system to pure numeric representations...")
+M_numeric = M_system.subs(subs_dict).evalf()
+RHS_numeric = RHS_vector.subs(subs_dict).evalf()
 
 
 # =============================================================================
-# 6. PRINT AN ANALYTICAL SAMPLE
+# REGULARIZATION: PINNING L=0 AND L=1 SINGULARITIES
 # =============================================================================
-print("\n--- Analytical Solutions Solved ---")
-print(f"Analytical expression for deflection w_0_0:\n{w_sol_symbolic[0]}\n")
-print(f"Analytical expression for stress function F_0_0:\n{F_sol_symbolic[0]}")
+print("Regularizing degree 0 and 1 rigid body translations...")
+
+for idx, (l, m) in enumerate(mode_map):
+    if l == 0 or l == 1:
+        # --- Pin Deflection (w_lm) ---
+        # Clear out the top row equation block for this mode
+        for col in range(M_numeric.cols):
+            M_numeric[idx, col] = 0.0
+        M_numeric[idx, idx] = 1.0  # Set diagonal to 1
+        RHS_numeric[idx, 0] = 0.0  # Force w_lm = 0
+        
+        # --- Pin Stress Function (F_lm) ---
+        # The F block is shifted by +N_modes rows down in the matrix
+        f_row_idx = idx + N_modes
+        for col in range(M_numeric.cols):
+            M_numeric[f_row_idx, col] = 0.0
+        M_numeric[f_row_idx, f_row_idx] = 1.0  # Set diagonal to 1
+        RHS_numeric[f_row_idx, 0] = 0.0       # Force F_lm = 0
+
+
+print("--- Solving System via LU Decomposition ---")
+# The matrix is now regularized and non-singular, so it solves immediately
+sol_matrix = M_numeric.LUsolve(RHS_numeric)
+
+# Split the answer vector back into w and F fields
+w_sol = sol_matrix[:N_modes, 0]
+F_sol = sol_matrix[N_modes:, 0]
+
+# =============================================================================
+# 6. PRINT RESULTS
+# =============================================================================
+print("\n--- System Solved Successfully ---")
+print(f"Deflection w_0_0 amplitude value: {w_sol[0]}")
+print(f"Stress function F_0_0 amplitude value: {F_sol[0]}")
+
+
+
+
+
+# CONVERT SOLUTIONS INTO PYSHTOOLS COEFFICIENTS AND THEN INTO GRIDS
+# 1. Initialize empty numpy coefficient arrays matching the shape (2, lmax+1, lmax+1)
+w_coeffs_np = np.zeros((2, lmax + 1, lmax + 1))
+F_coeffs_np = np.zeros((2, lmax + 1, lmax + 1))
+
+# 2. Map the flat solutions back using the pyshtools indexing rule
+for idx, (l, m) in enumerate(mode_map):
+    # Extract the numeric float value from the SymPy matrix elements
+    w_val = float(w_sol[idx])
+    F_val = float(F_sol[idx])
+    
+    if m >= 0:
+        # Positive m goes to the Cosine block (index 0)
+        w_coeffs_np[0, l, m] = w_val
+        F_coeffs_np[0, l, m] = F_val
+    else:
+        # Negative m goes to the Sine block (index 1) using its absolute value
+        m_abs = abs(m)
+        w_coeffs_np[1, l, m_abs] = w_val
+        F_coeffs_np[1, l, m_abs] = F_val
+
+# 3. Wrap the raw numpy arrays back into formal pyshtools SHCoeffs classes
+# Normalization must match the 'ortho' (fully normalized) standard used by the Gaunt integrals
+w_sol_clm = pysh.SHCoeffs.from_array(w_coeffs_np, normalization='ortho')
+F_sol_clm = pysh.SHCoeffs.from_array(F_coeffs_np, normalization='ortho')
+
+print("--- Conversion to SHCoeffs format complete ---")
+
+
+# 4. Expand the spectral coefficients out to spatial grids
+w_sol_grid = w_sol_clm.expand()
+F_sol_grid = F_sol_clm.expand()
+
+
+# 5. Generate the Plots
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+
+w_sol_grid.plot(
+    ax=ax1,
+    cmap=mycmap,
+    colorbar='right',
+    cb_label='Transverse Displacement w [m]'
+)
+ax1.set_title('Deflection Solution Field (lmax=3)')
+
+F_sol_grid.plot(
+    ax=ax2,
+    cmap=mycmap,
+    colorbar='right',
+    cb_label='Stress Function F [N]'
+)
+ax2.set_title('Elastic Stress Function Field (lmax=3)')
+
+plt.tight_layout()
+plt.show()
+
