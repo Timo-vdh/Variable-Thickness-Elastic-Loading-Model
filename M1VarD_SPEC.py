@@ -212,7 +212,7 @@ import sympy as sp
 from sympy.physics.wigner import gaunt
 
 # Set all inputs as symbols (at least for now)
-# nu, E, T_e, Re, g0, rho_m, rho_c = sp.symbols('nu E T_e Re g0 rho_m rho_c')
+nu, E, T_e, Re, g0, rho_m, rho_c = sp.symbols('nu E T_e Re g0 rho_m rho_c')
 
 # Pre-calculate the buoyancy term, as it is independent of degree and order directly
 buoy = (Re/T_e)**3 * Re/E * g0 * (rho_m-rho_c)
@@ -272,10 +272,17 @@ matrix_B = sp.Matrix.zeros(N_modes, N_modes)
 # In the final code, replace these with actual numerical values.
 D = {}
 a = {}
+y_sym = {}
 for L in range(lmax + 1):
     for M in range(-L, L + 1):
         D[(L, M)] = sp.Symbol(f'D_{L}_{M}')
         a[(L, M)] = sp.Symbol(f'alpha_{L}_{M}')
+        y_sym[(L, M)] = sp.Symbol(f'y_sym_{L}_{M}')
+
+# Symbolic definition of the loading function
+y_lm_str_sym = []
+for l, m in mode_map:
+    y_lm_str_sym.append(y_sym[(l, m)])
 
 
 # Calculate topographic loading coefficients y_lm
@@ -292,6 +299,7 @@ alm_str = []
 y_lm_unstr = pysh.shio.SHCilmToVector(y_lm)
 y_lm_str = []
 
+    
 # Map out how the pyshstools array is structured
 def find_custom_element(l, m, xlm_unstr):
     # Find the starting index of degree l in the shtools array (which is l^2)
@@ -324,11 +332,23 @@ y_lm_str = np.array(y_lm_str)
 ### PARAMETERS a AND b ###
 ##########################
 
-# Operator a^l, defined for every l equal to that of F_lm
-al = (Re/T_e)**3 / E    # STILL NEED TO ADD * (-l*(l+1)+2)  FOR EVERY l OF F_lm COEFFICIENTS
+# 1. Build the diagonal operator matrices a_l and b_l
+# These act as purely diagonal scalars multiplying the vectors element-by-element
+diag_a = np.zeros(N_modes)
+diag_b = np.zeros(N_modes)
 
-# Operator b^l, defined for every l equal to that of w_lm
-bl = -1                 # STILL NEED TO ADD * (-l*(l+1)+2)  FOR EVERY l OF F_lm COEFFICIENTS
+for i, (l, m) in enumerate(mode_map):
+    d_l = -l * (l + 1) + 2
+    
+    # Operator a^l (multiplies F_lm)
+    diag_a[i] = ((Re / T_e)**3 / E) * d_l
+    
+    # Operator b^l (multiplies w_lm, which is just -1 * d_l)
+    diag_b[i] = -1.0 * d_l
+
+# Convert vectors to diagonal matrices
+matrix_a_l = np.diag(diag_a)
+matrix_b_l = np.diag(diag_b)
 
 
 ##########################################
@@ -378,12 +398,12 @@ for i, (l, m) in enumerate(mode_map):
                 
                 ### Multiply the structural terms together and add to the cell accumulator
                 # IF EVALUATING NUMERICALLY, USE BELOW EQUATION FOR NUMERIC COEFFICIENTS OF D AND ALPHA
-                cell_sum_A += w_coef * D_val * q_val
-                cell_sum_B += w_coef * a_val * q_val
+                # cell_sum_A += w_coef * D_val * q_val
+                # cell_sum_B += w_coef * a_val * q_val
                 
                 # IF EVALUATING SYMBOLICALLY, USE BELOW EQUATION FOR SYMBOLIC COEFFICIENTS OF D AND ALPHA
-                # cell_sum_A += w_coef * D[(L,M)] * q_val
-                # cell_sum_B += w_coef * a[(L,M)] * q_val
+                cell_sum_A += w_coef * D[(L,M)] * q_val
+                cell_sum_B += w_coef * a[(L,M)] * q_val
         
         cell_sum_A = cell_sum_A * scaler_A
         cell_sum_B = cell_sum_B * scaler_B
@@ -426,9 +446,77 @@ print(f"Row (0,0), Col (2,0) Entry Matrix B:\n{matrix_B[0, 6]}\n")
 ################# EQS. A16 & A17#################
 #################################################
 
-# Set the w_lm and F_lm as the symbols to solve the system for
-w_lm, F_lm = sp.Symbols("w_lm F_lm")
+# =============================================================================
+# 5. SYMBOLIC SYSTEM ASSEMBLY & SOLUTION (PURE SYMPY)
+# =============================================================================
+
+# 1. Create vectors of SymPy symbols for the unknowns matching your mode_map
+w_symbols = []
+F_symbols = []
+y_symbols = []
+
+for (l, m) in mode_map:
+    w_symbols.append(sp.Symbol(f'w_{l}_{m}'))
+    F_symbols.append(sp.Symbol(f'F_{l}_{m}'))
+    # Optional: If you want loading to be symbolic too, uncomment below:
+    # y_symbols.append(sp.Symbol(f'y_{l}_{m}'))
+
+# Convert list of symbols into formal SymPy Column Vectors (Matrices of size N_modes x 1)
+vec_w = sp.Matrix(w_symbols)
+vec_F = sp.Matrix(F_symbols)
+
+# Using your calculated y_lm array from line 204 as the known symbolic/numeric RHS
+vec_y = sp.Matrix(y_lm_str) 
+# For symbolic definition of the loading
+vec_y = sp.Matrix(y_lm_str_sym) 
 
 
+# 2. Construct the diagonal operator matrices a_l and b_l symbolically
+matrix_a_l = sp.Matrix.zeros(N_modes, N_modes)
+matrix_b_l = sp.Matrix.zeros(N_modes, N_modes)
+
+for i, (l, m) in enumerate(mode_map):
+    d_l = -l * (l + 1) + 2
+    
+    # Operator a^l (Eq. A19): (Re/Te)^3 / E * (-l(l+1)+2)
+    matrix_a_l[i, i] = (Re / T_e)**3 / E * d_l
+    
+    # Operator b^l (Eq. A20): -1 * (-l(l+1)+2) -> maps F to w
+    matrix_b_l[i, i] = -1 * d_l
 
 
+# 3. Assemble the Full Block System Matrix and Right-Hand Side Vector
+# Equation 1: A*w + a_l*F = y
+# Equation 2: b_l*w + B*F = 0
+# Consolidating into: M_system * X_unknowns = RHS
+
+M_top = matrix_A.row_join(matrix_a_l)     # Left side blocks of Eq 1 & 2
+M_bottom = matrix_b_l.row_join(matrix_B)  # Right side blocks of Eq 1 & 2
+M_system = M_top.col_join(M_bottom)       # Full (2*N_modes) x (2*N_modes) matrix
+
+# Full combined unknowns vector: [w00, ..., wlm, F00, ..., Flm]
+X_unknowns = vec_w.col_join(vec_F)
+
+# Full right-hand side vector: [y00, ..., ylm, 0, ..., 0]
+RHS_vector = vec_y.col_join(sp.Matrix.zeros(N_modes, 1))
+
+
+print("--- Solving the Block System Symbolically ---")
+# 4. Run SymPy's linear system solver
+# linsolve returns a finite set containing the tuple of analytical solutions
+symbolic_solution = sp.linsolve((M_system, RHS_vector), list(X_unknowns))
+
+# Extract the raw solution tuple from the set wrapper
+sol_tuple = list(symbolic_solution)[0]
+
+# Split the answers back into individual arrays corresponding to w and F fields
+w_sol_symbolic = sol_tuple[:N_modes]
+F_sol_symbolic = sol_tuple[N_modes:]
+
+
+# =============================================================================
+# 6. PRINT AN ANALYTICAL SAMPLE
+# =============================================================================
+print("\n--- Analytical Solutions Solved ---")
+print(f"Analytical expression for deflection w_0_0:\n{w_sol_symbolic[0]}\n")
+print(f"Analytical expression for stress function F_0_0:\n{F_sol_symbolic[0]}")
