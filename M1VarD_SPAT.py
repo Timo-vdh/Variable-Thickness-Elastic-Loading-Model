@@ -82,7 +82,7 @@ rho_l = rho_c
 
 ######################################
 
-lmax = 100  # Maximum spherical harmonic degree to perform all calculations
+lmax = 120  # Maximum spherical harmonic degree to perform all calculations
 
 pot_clm = pysh.datasets.Mars.GMM3(lmax=120)
 topo_clm = pysh.datasets.Mars.MOLA_shape(lmax=lmax)
@@ -201,12 +201,12 @@ ax2.contour(
     wlm1_grid.data > 0, levels=[0.99], extent=(0, 360, -90, 90), colors="k", origin="upper"
 )
 
-# Plot value for multiplication factor with topography per spherical harmonic degree
-plt.figure()
-plt.semilogx(l[2:], factors_w[2:])
-plt.ylabel('Multiplication factor with H'), plt.xlabel('Spherical harmonic degree')
-plt.grid()
-plt.show()
+# # Plot value for multiplication factor with topography per spherical harmonic degree
+# plt.figure()
+# plt.semilogx(l[2:], factors_w[2:])
+# plt.ylabel('Multiplication factor with H'), plt.xlabel('Spherical harmonic degree')
+# plt.grid()
+# plt.show()
 
 
 
@@ -244,31 +244,31 @@ Flm1_grid.plot(cmap=mycmap,
 ### CREATING A SYNTHETIC VARIABLE Te MAP ###
 ############################################
 
-# # Initialize randomizer
-# seed = 1
-# l_corner = 10
-# beta = 3.0
-# power = np.zeros(lmax + 1)
-# for li in range(2, lmax+1):
-#     if li <= l_corner:
-#         power[li] = 1.0
-#     else:
-#         power[li] = (l_corner / li) ** beta
+# Initialize randomizer
+seed = 1
+l_corner = 10
+beta = 3.0
+power = np.zeros(lmax + 1)
+for li in range(2, lmax+1):
+    if li <= l_corner:
+        power[li] = 1.0
+    else:
+        power[li] = (l_corner / li) ** beta
 
-# # Make a random coefficient map
-# T_e_coeffs = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
-# T_e_array = T_e_coeffs.expand().to_array() + 150
-# T_e_grid = pysh.SHGrid.from_array(T_e_array)
-
-
-
-# Making a constant T_e map
-const_T_e_grid = np.ones(shape)*T_e
-
-T_e_coeffs = pysh.SHCoeffs.from_array(const_T_e_grid)
-T_e_grid = T_e_coeffs.expand()
-T_e_array = T_e * np.ones([203, 405])
+# Make a random coefficient map
+T_e_coeffs = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
+T_e_array = T_e_coeffs.expand().to_array() + 150
 T_e_grid = pysh.SHGrid.from_array(T_e_array)
+
+
+
+# # Making a constant T_e map
+# const_T_e_grid = np.ones(shape)*T_e
+
+# T_e_coeffs = pysh.SHCoeffs.from_array(const_T_e_grid)
+# T_e_grid = T_e_coeffs.expand()
+# T_e_array = T_e * np.ones([2*(lmax+1)+1, 4*(lmax+1)+1])
+# T_e_grid = pysh.SHGrid.from_array(T_e_array)
 
 # T_e_clm = T_e_grid.expand()
 # T_e_array2 = pysh.expand.MakeGridDH(T_e_clm.coeffs, lmax=lmax, sampling = 2)
@@ -287,7 +287,7 @@ alm = np.zeros(shape)
 # T_e_array = T_e_coeffs.expand().to_array()
 
 # First calculate in array form, then convert result to SHGrid and then to SHCoeffs
-D_array = E*(T_e_array*1e3)**3 / (12*(1-nu**2))
+D_array = E*(T_e_array)**3 / (12*(1-nu**2))
 a_array = 1/(E*T_e_array)
 
 D_grid = pysh.SHGrid.from_array(D_array)
@@ -303,7 +303,7 @@ T_e_grid.plot(ax=ax1,
               cmap=mycmap,
               colorbar='right',
               # cb_tick_interval=2,
-              cmap_limits=[149999, 150001],
+              # cmap_limits=[149999, 150001],
               cb_label= 'Synthetic T_e map, km'
               )
 # T_e_grid2.plot(ax=ax2,
@@ -382,11 +382,12 @@ def get_derivatives(par_coeffs):
     
 def derivative_arrays(par_coeffs):
     """
-    This function makes arrays of the derivatives to use in calculations
+    Computes pure partial derivatives on the spatial grid, 
+    bypassing the 1/sin(theta) singular divisions at the poles.
     
+    This function makes arrays of the derivatives to use in calculations
     Input:
         - Spherical harmonic coefficients of a variable 'par'
-    
     Output:
         - par_array             --> Array of undifferentiated par
         - dpar1_theta_array     --> Array of dpar1/dtheta
@@ -396,24 +397,33 @@ def derivative_arrays(par_coeffs):
         - dpar2_thetaphi_array  --> Array of dpar2/dthetaphi
     """
     
-    # Call derivative function
-    (dpar1_theta, dpar1_phi, 
-     dpar2_theta2, dpar2_phi2, dpar2_thetaphi) = get_derivatives(par_coeffs)  # Grid files
+    grid = par_coeffs.expand()
+    data = grid.data
+    nlat, nlon = data.shape
     
-    # Make arrays for computations
-    par_array = par_coeffs.expand().data        # Array of size (2*(lmax + 1)+1 , 4*(lmax + 1)+1)
-    dpar1_theta_array = dpar1_theta.data        # Array of size (2*(lmax + 1)+1 , 4*(lmax + 1)+1)
-    dpar1_phi_array = dpar1_phi.data            # Array of size (2*(lmax + 1)+1 , 4*(lmax + 1)+1)
-    dpar2_theta2_array = dpar2_theta2.data      # Array of size (2*(lmax + 1)+1 , 4*(lmax + 1)+1)
-    dpar2_phi2_array = dpar2_phi2.data          # Array of size (2*(lmax + 1)+1 , 4*(lmax + 1)+1)
-    dpar2_thetaphi_array = dpar2_thetaphi.data  # Array of size (2*(lmax + 1)+1 , 4*(lmax + 1)+1)
-
-
+    # Grid spacing in radians
+    lats = np.radians(grid.lats())
+    lons = np.radians(grid.lons())
+    
+    # We want colatitude grid steps
+    thetas = np.pi/2.0 - lats
+    dtheta = np.abs(thetas[1] - thetas[0])
+    dphi = np.abs(lons[1] - lons[0])
+    
+    # 1. First derivatives via central differences (edge-padded to preserve shape)
+    dpar1_theta_array = np.gradient(data, dtheta, axis=0)
+    dpar1_phi_array = np.gradient(data, dphi, axis=1)
+    
+    # 2. Second derivatives
+    dpar2_theta2_array = np.gradient(dpar1_theta_array, dtheta, axis=0)
+    dpar2_phi2_array = np.gradient(dpar1_phi_array, dphi, axis=1)
+    dpar2_thetaphi_array = np.gradient(dpar1_theta_array, dphi, axis=1)
+    
     return (
-            par_array, 
-            dpar1_theta_array, dpar1_phi_array, dpar2_theta2_array, 
-            dpar2_phi2_array, dpar2_thetaphi_array
-            )
+        data, 
+        dpar1_theta_array, dpar1_phi_array, dpar2_theta2_array, 
+        dpar2_phi2_array, dpar2_thetaphi_array
+    )
 
 def plot_derivatives(par_coeffs, par):
     """
@@ -465,7 +475,25 @@ def plot_derivatives(par_coeffs, par):
 # plot_derivatives(alm_coeffs, 'a')        # Plot derivatives of a
 
 
+# --- DOMAIN SCALING FACTORS ---
+# Use the constant baseline values as your characteristic reference scales
+D_scale = float(E * T_e**3 / (12 * (1 - nu**2)))  # ~2.81e25
+a_scale = float(1.0 / (E * T_e))                  # ~6.66e-17
 
+# Non-dimensionalize the arrays prior to calculating Operator A
+D_array = D_array / D_scale
+dD1_theta_array = dD1_theta_array / D_scale
+dD1_phi_array   = dD1_phi_array / D_scale
+dD2_theta2_array = dD2_theta2_array / D_scale
+dD2_phi2_array   = dD2_phi2_array / D_scale
+dD2_thetaphi_array = dD2_thetaphi_array / D_scale
+
+a_array = a_array / a_scale
+da1_theta_array = da1_theta_array / a_scale
+da1_phi_array   = da1_phi_array / a_scale
+da2_theta2_array = da2_theta2_array / a_scale
+da2_phi2_array   = da2_phi2_array / a_scale
+da2_thetaphi_array = da2_thetaphi_array / a_scale
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -487,7 +515,7 @@ theta_grid = np.tile(theta_1d[:, np.newaxis], (1, nlon))  # (nlat, nlon)
  
 # Safe trig functions: avoid singularity exactly at poles
 _sin = np.sin(theta_grid)
-_sin_safe = np.where(np.abs(_sin) < 1e-12, 1e-12, _sin)
+_sin_safe = np.where(np.abs(_sin) < 1e-50, 1e-50, _sin)
  
 COT  = np.cos(theta_grid) / _sin_safe             # cot(theta)
 CSC2 = 1.0 / _sin_safe**2                         # csc^2(theta)
@@ -504,27 +532,34 @@ A_aF = (
     - 2 * CSC2 * (da2_thetaphi_array - COT * da1_phi_array) * (dF2_thetaphi_array - COT * dF1_phi_array)
 )
 
+
 # Now the term with differential operator A is in SH coefficients
 A_Dw_lm_grid = pysh.SHGrid.from_array(A_Dw)
-A_Dw_lm = A_Dw_lm_grid.expand()
-A_aF_lm = pysh.SHGrid.from_array(A_aF).expand()
+A_aF_lm_grid = pysh.SHGrid.from_array(A_aF)
 
+A_Dw_lm = A_Dw_lm_grid.expand() * D_scale
+A_aF_lm = A_aF_lm_grid.expand() * a_scale
 
-# fig3, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-# pysh.SHGrid.from_array(A_Dw).plot(ax=ax1,
-#               cmap=mycmap,
-#               colorbar='right',
-#               # cb_tick_interval=2,
-#               # cmap_limits=[-4, 4],
-#               cb_label= 'A_Dw'
-#               )
-# pysh.SHGrid.from_array(A_aF).plot(ax=ax2,
-#               cmap=mycmap,
-#               colorbar='right',
-#               # cb_tick_interval=2,
-#               # cmap_limits=[-4, 4],
-#               cb_label= 'A_aF'
-#               )
+# Plot the power spectrum of the operator A_Dw
+fig, ax = A_Dw_lm.plot_spectrum(show=False)
+ax.set_title("Power Spectrum of Operator A(D;w)")
+ax.grid(True, which="both", ls="--", alpha=0.5)
+# plt.ylim(1e-7,1)
+plt.show()
+
+fig3, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+A_Dw_lm.expand().plot(ax=ax1,
+              cmap=mycmap,
+              colorbar='right',
+              # cmap_limits=[-4, 4],
+              cb_label= 'A_Dw'
+              )
+A_aF_lm.expand().plot(ax=ax2,
+              cmap=mycmap,
+              colorbar='right',
+              # cmap_limits=[-4, 4],
+              cb_label= 'A_aF'
+              )
 
 
 # If D and a are constant, the operator should reduce to A(D;w) = D*(nabla**2+2)*wlm
@@ -539,22 +574,20 @@ A_Dw_const = pysh.SHCoeffs.from_array(A_Dw_const)
 A_Dw_const_grid = A_Dw_const.expand()
 
 # This should be fully zero for constant D
-check_eqA = A_Dw_lm_grid.data - A_Dw_const_grid.data
+check_eqA = A_Dw_lm_grid.data - A_Dw_const_grid.data/(E*T_e**3/(12*(1-nu**2)))
 
 # Plot equation A(D;w) Grid result vs simplified A(D;w) Grid result
 fig4, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-A_Dw_lm_grid.plot(ax=ax1,
+A_Dw_lm.expand().plot(ax=ax1,
               cmap=mycmap,
               colorbar='right',
-              # cb_tick_interval=2,
-              cmap_limits=[-2e31, 5e31],
+              # cmap_limits=[-2e31, 5e31],
               cb_label= 'A_Dw from eq'
               )
 A_Dw_const_grid.plot(ax=ax2,
               cmap=mycmap,
               colorbar='right',
-              # cb_tick_interval=2,
-              cmap_limits=[-2e31, 5e31],
+              # cmap_limits=[-2e31, 5e31],
               cb_label= 'A_Dw with constant D'
               )
 
@@ -563,35 +596,65 @@ A_Dw_const_grid.plot(ax=ax2,
 ### SOLVING FOR w AND F ITERATIVELY ###
 
 wlm2 = np.zeros(shape)
+Dlm_coeffs_p = np.zeros(shape)
 
 for degree in range(2, lmax + 1):#Ignore degree 0 from calculations
+    for degree_prime in range(2, lmax + 1):#Ignore degree 0 from calculations
+        
+        Dlm_coeffs_p[: , degree , : degree+1] += (Lapl[degree_prime]+2) * Dlm_coeffs.coeffs[: , degree , : degree+1]
+    
     wlm2[: , degree , : degree+1]=(
-                                    (A_Dw_lm.coeffs[:,degree,:degree+1]
+                                    ((1-nu)*A_Dw_lm.coeffs[:,degree,:degree+1]
                                      - Re**3 * (Lapl[degree]+2) * Flm1_coeffs.coeffs[: , degree , : degree+1]
                                      - Re**4 * g0 * rho_l * topo_clm.coeffs[: , degree , : degree+1])
                                     /
-                                    ( (Lapl[degree]+2)**2 * Dlm_coeffs.coeffs[: , degree , : degree+1]
+                                    ( (Lapl[degree]+2) * Dlm_coeffs_p[: , degree , : degree+1]       # Think this step is wrong with Dlm
                                      + Re**4 * g0 * (rho_m - rho_c) )
                                     )
 
 wlm2_coeffs = pysh.SHCoeffs.from_array(wlm2)
 wlm2_grid = wlm2_coeffs.expand()
 
-
-
-fig3, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+fig5, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 wlm1_grid.plot(ax=ax1,
                cmap=mycmap,
                colorbar='right',
                # cb_tick_interval=2,
-               # cmap_limits=[-4, 4],
+               cmap_limits=[-20e3, 20e3],
                cb_label= f'Displacement 1 at ref. surface [km] - T_e={int(T_e/1e3)} km'
                )
-
 wlm2_grid.plot(ax=ax2,
                cmap=mycmap,
                colorbar='right',
                # cb_tick_interval=2,
-               # cmap_limits=[-4, 4],
+               cmap_limits=[-20e3, 20e3],
                cb_label= f'Displacement 2 at ref. surface [km] - T_e={int(T_e/1e3)} km'
                )
+
+
+
+Flm2 = np.zeros(shape)
+
+for degree in range(2, lmax + 1):#Ignore degree 0 from calculations
+    Flm2[: , degree , : degree+1]=(
+                                    ((1+nu)*A_aF_lm.coeffs[:,degree,:degree+1]
+                                     + 1/Re * (Lapl[degree]+2) * wlm2_coeffs.coeffs[: , degree , : degree+1])
+                                    /
+                                    ( (Lapl[degree]+2)**2 * alm_coeffs.coeffs[: , degree , : degree+1])       # Think this step is wrong with alm
+                                    )
+
+Flm2_coeffs = pysh.SHCoeffs.from_array(Flm2)
+Flm2_grid = Flm2_coeffs.expand()
+
+fig6, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+Flm1_grid.plot(ax=ax1,
+               cmap=mycmap,
+               colorbar='right',
+               cb_label= f'Stress function 1 - T_e={int(T_e/1e3)} km'
+               )
+Flm2_grid.plot(ax=ax2,
+               cmap=mycmap,
+               colorbar='right',
+               cb_label= f'Stress function 2 - T_e={int(T_e/1e3)} km'
+               )
+
