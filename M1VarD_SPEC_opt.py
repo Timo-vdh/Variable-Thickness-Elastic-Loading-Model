@@ -13,7 +13,6 @@ import time
 
 start = time.time()
 
-
 #######################################
 """
 Model for the variable thickness deformations of Beuthe (2008).
