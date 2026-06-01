@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Created on Wed May 27 14:02:56 2026
@@ -9,7 +8,6 @@ Created on Wed May 27 14:02:56 2026
 import numpy as np
 import matplotlib.pyplot as plt
 import pyshtools as pysh
-from palettable import scientific as scm
 import time
 import scipy.sparse as sparse
 import scipy.sparse.linalg as spla
@@ -81,10 +79,10 @@ g0 = 3.8
 R = 3395e3
 
 # Set maximum spherical harmonic degree to perform all calculations
-lmax = 15  
+lmax = 100  
 # Set whether analysing in 1D (Axisymmetric = True) or 2D geometry
 # 1D is MUCH faster for high lmax analyses
-AXISYMMETRIC = False
+AXISYMMETRIC = True
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 # Coefficients shape following pyshtools definition
@@ -149,7 +147,7 @@ T_e_III_clm = T_e_III_grid.expand()
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ####################################################
-### DEFINE EQUATIONS FOR THE MATRIX CALCULATIONS ###
+### DEFINE FUNCTIONS FOR THE MATRIX CALCULATIONS ###
 ####################################################
 
 # Map out how the pyshstools array is structured
@@ -166,6 +164,10 @@ def find_custom_element(l_param, m_param, xlm_unstr):
 
 # Fast numeric W-coefficients evaluation
 def W_numeric_A(l_deg, l_prime, L, nu_val=0.25):
+    """
+    The W-term of Matrix A is the large term in square brackets of Kalousova 
+    et al. (2012) equation A18.
+    """
     d_l = -l_deg * (l_deg + 1) + 2
     d_lp = -l_prime * (l_prime + 1) + 2
     d_L = -L * (L + 1) + 2
@@ -177,8 +179,11 @@ def W_numeric_A(l_deg, l_prime, L, nu_val=0.25):
     return term1 + 0.25 * (1.0 - nu_val) * bracket
 
 def W_numeric_B(l_deg, l_prime, L, nu_val=0.25):
-    # Only difference with W_numeric_A is in the final 'return'-term:
-    # (1 + nu) vs (1 - nu)
+    """
+    The W-term of Matrix B is the large term in square brackets of Kalousova 
+    et al. (2012) equation A18. The only difference with W_numeric_A is in the 
+    final 'return'-term, (1 + nu) vs (1 - nu)
+    """
     d_l = -l_deg * (l_deg + 1) + 2
     d_lp = -l_prime * (l_prime + 1) + 2
     d_L = -L * (L + 1) + 2
@@ -405,13 +410,13 @@ for model_name, active_Te_array in models_to_test.items():
                 if val_B != 0.0:
                     matrix_B_sparse[i, j] = val_B        
 
-    print("Combining sub-blocks into a sparse 2N x 2N architecture...")
+    print("Combining sub-matrices into a sparse 2N x 2N architecture...")
     M_system_sparse = sparse.bmat([
         [matrix_A_sparse,     matrix_a_l_sparse],
         [matrix_b_l_sparse,   matrix_B_sparse]
     ], format="lil")
 
-    print("Applying boundary constraints to low-degree modes (Regularization)...")
+    print("Setting degree 0 and 1 to zero...")
     for idx, (l_val, m_val) in enumerate(mode_map):
         if l_val == 0 or l_val == 1:
             M_system_sparse[idx, :] = 0.0
@@ -419,10 +424,10 @@ for model_name, active_Te_array in models_to_test.items():
             M_system_sparse[idx + N_modes, :] = 0.0
             M_system_sparse[idx + N_modes, idx + N_modes] = 1.0
 
-    print("Converting to CSR format...")
+    # Convert to CSR (compressed sparse row) format for faster calculations
     M_system_csr = M_system_sparse.tocsr()
 
-    # Create subplot framework mimicking the layout structure of Kalousova Figure 6
+    # Create subplot framework mimicking the layout structure of Kalousova Figure 6-8
     fig_verify, axes = plt.subplots(4, 1, figsize=(6, 16))
     fig_verify.suptitle(f"Radial Displacement Response Lines for {model_name}, lmax={lmax}", fontsize=12, fontweight='bold')
 
@@ -476,7 +481,7 @@ for model_name, active_Te_array in models_to_test.items():
 
 
         # 2. LOCAL SOLUTION VIA TURCOTTE APPROXIMATION (EQ. 20)
-        # Generate spatial layout grid for our isolated target input harmonic load
+        # Generate spatial layout grid for each isolated target input harmonic load
         h_single_clm = pysh.SHCoeffs.from_array(h_synthetic, normalization='ortho')
         h_single_grid = h_single_clm.expand()
         h_spatial_profile = h_single_grid.data[:, 0] # Zonal spatial slice of input load
@@ -513,5 +518,5 @@ for model_name, active_Te_array in models_to_test.items():
     plt.show()
 
 end = time.time()
-print("\n--- Entire Validation System Run Complete ---")
+print("\n--- Entire Verification System Run Complete ---")
 print("Total runtime:", round(end - start, 1), "seconds")
