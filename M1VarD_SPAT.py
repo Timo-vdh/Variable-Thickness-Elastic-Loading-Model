@@ -244,35 +244,35 @@ Flm1_grid.plot(cmap=mycmap,
 ### CREATING A SYNTHETIC VARIABLE Te MAP ###
 ############################################
 
-# Initialize randomizer
-seed = 1
-l_corner = 10
-beta = 3.0
-power = np.zeros(lmax + 1)
-for li in range(2, lmax+1):
-    if li <= l_corner:
-        power[li] = 1.0
-    else:
-        power[li] = (l_corner / li) ** beta
+# # Initialize randomizer
+# seed = 1
+# l_corner = 10
+# beta = 3.0
+# power = np.zeros(lmax + 1)
+# for li in range(2, lmax+1):
+#     if li <= l_corner:
+#         power[li] = 1.0
+#     else:
+#         power[li] = (l_corner / li) ** beta
 
-# Make a random coefficient map
-T_e_coeffs = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
-T_e_array = T_e_coeffs.expand().to_array() + 150
-T_e_grid = pysh.SHGrid.from_array(T_e_array)
-
-
-
-# # Making a constant T_e map
-# const_T_e_grid = np.ones(shape)*T_e
-
-# T_e_coeffs = pysh.SHCoeffs.from_array(const_T_e_grid)
-# T_e_grid = T_e_coeffs.expand()
-# T_e_array = T_e * np.ones([2*(lmax+1)+1, 4*(lmax+1)+1])
+# # Make a random coefficient map
+# T_e_coeffs = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
+# T_e_array = T_e_coeffs.expand().to_array() + 150
 # T_e_grid = pysh.SHGrid.from_array(T_e_array)
 
-# T_e_clm = T_e_grid.expand()
-# T_e_array2 = pysh.expand.MakeGridDH(T_e_clm.coeffs, lmax=lmax, sampling = 2)
-# T_e_grid2 = pysh.SHGrid.from_array(T_e_array2)
+
+
+# Making a constant T_e map
+const_T_e_grid = np.ones(shape)*T_e
+
+T_e_coeffs = pysh.SHCoeffs.from_array(const_T_e_grid)
+T_e_grid = T_e_coeffs.expand()
+T_e_array = T_e * np.ones([2*(lmax+1)+1, 4*(lmax+1)+1])
+T_e_grid = pysh.SHGrid.from_array(T_e_array)
+
+T_e_clm = T_e_grid.expand()
+T_e_array2 = pysh.expand.MakeGridDH(T_e_clm.coeffs, lmax=lmax, sampling = 2)
+T_e_grid2 = pysh.SHGrid.from_array(T_e_array2)
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 # Calculate the variable Flexural rigidity D and parameter alpha (a) 
@@ -541,7 +541,7 @@ A_Dw_lm = A_Dw_lm_grid.expand() * D_scale
 A_aF_lm = A_aF_lm_grid.expand() * a_scale
 
 # Plot the power spectrum of the operator A_Dw
-fig, ax = A_Dw_lm.plot_spectrum(show=False)
+fig, ax = A_Dw_lm.plot_spectrum2d(show=False)
 ax.set_title("Power Spectrum of Operator A(D;w)")
 ax.grid(True, which="both", ls="--", alpha=0.5)
 # plt.ylim(1e-7,1)
