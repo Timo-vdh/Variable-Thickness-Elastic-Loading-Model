@@ -82,6 +82,7 @@ M = 0           # Thickness of density anomaly in mantle
 # Set maximum spherical harmonic degree to perform all calculations
 lmax = 15  
 
+
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ## Load in topography and gravity data
 pot_clm = pysh.datasets.Mars.GMM3(lmax=lmax)
@@ -124,32 +125,32 @@ shape = (2, lmax + 1, lmax + 1)
 ### CREATING A SYNTHETIC VARIABLE Te MAP ###
 ############################################
 
-# Initialize randomizer
-seed = 1
-l_corner = 10
-beta = 3.0
-power = np.zeros(lmax + 1)
-for li in range(2, lmax+1):
-    if li <= l_corner:
-        power[li] = 20.0
-    else:
-        power[li] = (l_corner / li) ** beta
+# # Initialize randomizer
+# seed = 1
+# l_corner = 10
+# beta = 3.0
+# power = np.zeros(lmax + 1)
+# for li in range(2, lmax+1):
+#     if li <= l_corner:
+#         power[li] = 20.0
+#     else:
+#         power[li] = (l_corner / li) ** beta
 
-# Make a random coefficient map
-T_e_type = 'Random_TeMap'
-T_e_clm = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
-T_e_array = T_e_clm.expand().to_array()*1e3 + 150e3
-T_e_grid = pysh.SHGrid.from_array(T_e_array)
-
-# # Making a constant T_e map
-# T_e_type = 'Constant_TeMap'
-# T_e = 150e3
-# const_T_e_grid = np.ones(shape)*T_e
-
-# T_e_coeffs = pysh.SHCoeffs.from_array(const_T_e_grid).convert(normalization = '4pi')
-# T_e_grid = T_e_coeffs.expand()
-# T_e_array = T_e * np.ones([2*(lmax+1)+1, 4*(lmax+1)+1])
+# # Make a random coefficient map
+# T_e_type = 'Random_TeMap'
+# T_e_clm = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
+# T_e_array = T_e_clm.expand().to_array()*1e3 + 150e3
 # T_e_grid = pysh.SHGrid.from_array(T_e_array)
+
+# Making a constant T_e map
+T_e_type = 'Constant_TeMap'
+T_e = 150e3
+const_T_e_grid = np.ones(shape)*T_e
+
+T_e_coeffs = pysh.SHCoeffs.from_array(const_T_e_grid).convert(normalization = '4pi')
+
+T_e_array = T_e * np.ones([2*(lmax+1)+1, 4*(lmax+1)+1])
+T_e_grid = pysh.SHGrid.from_array(T_e_array)
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ####################################################
@@ -201,36 +202,43 @@ def W_numeric_B(l_deg, l_prime, L, nu_val=0.25):
     return term1 + 0.25 * (1.0 + nu_val) * bracket
 
 # Fast numerical evaluation of Gaunt Coefficients using pyshtools
-def get_numeric_gaunt(l1, l2, l3, m1, m2, m3):
+def get_numeric_gaunt(l, lp, L, m, mp, M):
     """
     Perform the Gaunt Coefficient calculations here including the selection
     rules as also given in Kalousova et al. (2012).
     Gaunt Coefficients are calculated using the Wigner3j symbols.
+    
+    l = l
+    l1 = L
+    l2 = l'
     """
     # Selection rules for the Gaunt Coefficients
-    if (l1 + l2 + l3) % 2 != 0:
+    if (l + lp + L) % 2 != 0:
         return 0.0
-    if not (abs(l1 - l2) <= l3 <= l1 + l2):
+    if not (abs(L - lp) <= l <= L + lp):
         return 0.0
-    if m1 + m2 + m3 != 0:
+    if m + mp + M != 0:
         return 0.0
 
     # Evaluate the vector for m components
-    w3j_m_array, jmin_m, jmax_m = pysh.utils.Wigner3j(l2, l3, m1, m2, m3)
-    if not (jmin_m <= l1 <= jmax_m):
+    w3j_m_array, jmin_m, jmax_m = pysh.utils.Wigner3j(lp, L, m, mp, M)
+    if not (jmin_m <= l <= jmax_m):
        return 0.0
 
-    w3j_m = w3j_m_array[l1 - jmin_m]
+    w3j_m = w3j_m_array[l - jmin_m]
 
     # Evaluate the vector for the m=0 components
-    w3j_0_array, jmin_0, jmax_0 = pysh.utils.Wigner3j(l2, l3, 0, 0, 0)
-    if not (jmin_0 <= l1 <= jmax_0):
+    w3j_0_array, jmin_0, jmax_0 = pysh.utils.Wigner3j(lp, L, 0, 0, 0)
+    if not (jmin_0 <= l <= jmax_0):
        return 0.0
 
-    w3j_0 = w3j_0_array[l1 - jmin_0]
+    w3j_0 = w3j_0_array[l - jmin_0]
     
-    factor = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) * (2 * l3 + 1) / (4.0 * np.pi))
+    factor = np.sqrt((2 * L + 1) * (2 * lp + 1) / (4.0 * np.pi * (2 * l + 1)))
+    # print(factor, w3j_m, w3j_0)
     return factor * w3j_m * w3j_0
+
+
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #############################################################
@@ -262,7 +270,7 @@ rho_term = -rho_c / (rho_m - rho_c)
 
 # Quick and simple calculation of constant thickness deflection
 wlm_turcotte = np.zeros(shape)
-T_e_constant = 150e3
+T_e_constant = np.mean(T_e_array)
 for degree in range(2, lmax + 1):  # Ignore degree 0 from calculations
     C_l_local = C_l_functional(degree, nu, E, T_e_constant, R-T_e_constant/2, rho_m, rho_c, g0)
     wlm_turcotte[: , degree , : degree+1] = (rho_term * C_l_local
@@ -337,9 +345,11 @@ for i, (l_val, m_val) in enumerate(mode_map):
     d_l = -l_val * (l_val + 1) + 2
     diag_a[i] = ((Re / T_e_0)**3 / E) * d_l
     diag_b[i] = -1.0 * d_l
+    print(l_val, m_val, diag_a[i])
 
 matrix_a_l_sparse = sparse.diags(diag_a, format="lil")
 matrix_b_l_sparse = sparse.diags(diag_b, format="lil")
+
 
 print("Assembling coupling combinations across spectral elements...")
 for i, (l_val, m_val) in enumerate(mode_map):
@@ -356,21 +366,21 @@ for i, (l_val, m_val) in enumerate(mode_map):
             
             w_coef_A = W_numeric_A(l_val, l_prime, L, nu)
             w_coef_B = W_numeric_B(l_val, l_prime, L, nu)
-            if w_coef_A == 0.0:
+            if w_coef_A == 0.0 or w_coef_B == 0:     
                 continue
             
             for M in range(-L, L + 1):
-                q_val = get_numeric_gaunt(l_val, L, l_prime, m_val, M, m_prime)
+                q_val = get_numeric_gaunt(l_val, l_prime, L, m_val, m_prime, M)
                 if q_val == 0.0:
                     continue
                 
-                L_idx = L * (L + 1) + M
                 D_val = float(find_custom_element(L, M, Dlm_unstr))
                 a_val = float(find_custom_element(L, M, alm_unstr))
 
-                print(f'w_coef_A = {w_coef_A}')
-                print(f'D_val = {D_val}')
-                print(f'q_val = {q_val}')
+                # print(f"\nl,m={l_val, m_val}, l',m'={l_prime, m_prime}, L,M={L,M}")
+                # print(f'w_coef_A = {w_coef_A}')
+                # print(f'D_val = {D_val}')
+                # print(f'q_val = {q_val}')
                 cell_sum_A += w_coef_A * D_val * q_val 
                 cell_sum_B += w_coef_B * a_val * q_val
         
@@ -403,7 +413,7 @@ for idx, (l_val, m_val) in enumerate(mode_map):
 # Convert to CSR (compressed sparse row) format for faster calculations
 M_system_csr = M_system_sparse.tocsr()
 
-# Resolve responses for each individual loading case specified in the paper
+# Calculate the RHS components
 print(f"Solving structural displacement vector for lmax={lmax}")
 factors_y_lm = (Re / T_e_0)**3 * (rho_c * g0 * Re) / E
    
@@ -442,8 +452,9 @@ displacement_profile_beuthe = w_sol_grid_beuthe.data[:, 0]  # Isolated zonal lin
 
 # Plot the 1D and 2D power spectra of the displacement coefficients
 w_sol_clm_beuthe.plot_spectrum()
-w_sol_clm_beuthe.plot_spectrum2d()
-
+fig, ax = w_sol_clm_beuthe.plot_spectrum2d(show=False)
+ax.set_title("Power Spectrum of displacement w")
+plt.show()
 
 
 # PLOT SPATIAL 2D COMPONENT FIELDS ---
@@ -488,3 +499,27 @@ a_grid.plot(ax=ax3,
 
 
 
+
+
+A_dense = matrix_A_sparse.toarray()
+
+print(
+    np.max(
+        np.abs(
+            A_dense - np.diag(np.diag(A_dense))
+        )
+    )
+)
+
+
+def max_offdiag(matrix):
+    # Convert to a NumPy array (if it isn't one already)
+    mat = np.array(matrix)
+    
+    # Create a boolean mask of the diagonal, invert it (~) to get off-diagonals
+    mask = ~np.eye(mat.shape[0], dtype=bool)
+    
+    # Return the maximum value of the masked array
+    return np.max(mat[mask])
+
+print(max_offdiag(A_dense))

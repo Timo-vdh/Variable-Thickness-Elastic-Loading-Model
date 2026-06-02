@@ -79,7 +79,7 @@ g0 = 3.8
 R = 3395e3
 
 # Set maximum spherical harmonic degree to perform all calculations
-lmax = 100  
+lmax = 30  
 # Set whether analysing in 1D (Axisymmetric = True) or 2D geometry
 # 1D is MUCH faster for high lmax analyses
 AXISYMMETRIC = True
@@ -221,7 +221,7 @@ def get_numeric_gaunt(l1, l2, l3, m1, m2, m3):
         return 0.0
     w3j_0 = w3j_0_array[l1 - jmin_0]
     
-    factor = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) * (2 * l3 + 1) / (4.0 * np.pi))
+    factor = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) * (2 * l3 + 1) / (4.0 * np.pi))  # Is the convention right here????
     return factor * w3j_m * w3j_0
 
 
@@ -396,11 +396,19 @@ for model_name, active_Te_array in models_to_test.items():
                     D_val = float(find_custom_element(L, 0, Dlm_unstr))
                     a_val = float(find_custom_element(L, 0, alm_unstr))
                     
+                    # print(f'w_coef_A = {w_coef_A}')
+                    # print(f'D_val = {D_val}')
+                    # print(f'q_val = {q_val}')                    
+                    
                     cell_sum_A += w_coef_A * D_val * q_val
                     cell_sum_B += w_coef_B * a_val * q_val
                 
+                if l_val == 3 or l_val == 4:
+                    print(f'cell_sum_A = {cell_sum_A} at l_val={l_val}')
+                    
                 val_A = cell_sum_A * scaler_A
                 val_B = cell_sum_B * scaler_B
+                
                 
                 if l_val == l_prime:
                     val_A += buoy
@@ -479,7 +487,6 @@ for model_name, active_Te_array in models_to_test.items():
         displacement_profile_beuthe = w_sol_grid.data[:, 0]  # Isolated zonal line profile
 
 
-
         # 2. LOCAL SOLUTION VIA TURCOTTE APPROXIMATION (EQ. 20)
         # Generate spatial layout grid for each isolated target input harmonic load
         h_single_clm = pysh.SHCoeffs.from_array(h_synthetic, normalization='ortho')
@@ -513,10 +520,11 @@ for model_name, active_Te_array in models_to_test.items():
         axes[ax_idx].grid(True, linestyle="--", alpha=0.5)
 
     plt.tight_layout()
-    os.makedirs('Plots/M1VarD_SPEC_opt_ver results/', exist_ok=True)
-    plt.savefig(f'Plots/M1VarD_SPEC_opt_ver results/Kalousova_{model_name.replace(" ", "_")}_lmax{lmax}_1D={AXISYMMETRIC}.png', dpi=200)
+    # os.makedirs('Plots/M1VarD_SPEC_opt_ver results/', exist_ok=True)
+    # plt.savefig(f'Plots/M1VarD_SPEC_opt_ver results/Kalousova_{model_name.replace(" ", "_")}_lmax{lmax}_1D={AXISYMMETRIC}.png', dpi=200)
     plt.show()
 
 end = time.time()
 print("\n--- Entire Verification System Run Complete ---")
 print("Total runtime:", round(end - start, 1), "seconds")
+
