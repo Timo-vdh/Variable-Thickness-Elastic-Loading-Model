@@ -80,8 +80,11 @@ dp = 0          # Crustal density variations delta rho (used in Banerdt)
 M = 0           # Thickness of density anomaly in mantle
 
 # Set maximum spherical harmonic degree to perform all calculations
-lmax = 15 
+lmax = 25  
 
+# Set whether rotation of inputs is applied or not - Verification method
+Rotated = True
+Rotated_SaveFig = False
 # Set whether output figures are saved or not
 Save_Figs = False
 
@@ -96,21 +99,24 @@ pot_clm = pot_clm.change_ref(r0=R)  # Downward continue to Mean planetary radius
 # Compute the geoid as approximated in Banerdt's formulation
 geoid_clm = pot_clm * R
 
+# Remove 100% of C20
+percent_C20 = 0.0
+topo_clm.coeffs[0, 2, 0] = (percent_C20 / 100.0) * topo_clm.coeffs[0, 2, 0]
+geoid_clm.coeffs[0, 2, 0] = (percent_C20 / 100.0) * geoid_clm.coeffs[0, 2, 0]
+
+
 # Constants
 G = pysh.constants.G.value  # Gravitational constant
 gm = pot_clm.gm  # GM given in the gravity model file
 mass = gm / G  # Mass of the planet
 g0 = gm / R**2  # Mean gravitational attraction of the planet
 
-# Remove 100% of C20
-percent_C20 = 0.0
-topo_clm.coeffs[0, 2, 0] = (percent_C20 / 100.0) * topo_clm.coeffs[0, 2, 0]
-geoid_clm.coeffs[0, 2, 0] = (percent_C20 / 100.0) * geoid_clm.coeffs[0, 2, 0]
 
 # Set color map
 mycmap = scm.diverging.Vik_20.mpl_colormap
 
 shape = (2, lmax + 1, lmax + 1)
+
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ############################################
@@ -149,7 +155,6 @@ theta_range = np.linspace(0, 180, 2*(lmax+1)+1)
 # T_e_type = 'Random_TeMap'
 # T_e_clm = pysh.SHCoeffs.from_random(power, lmax=lmax, seed=seed)
 # T_e_array = T_e_clm.expand().to_array()*1e3 + 150e3
-# T_e_mean = np.mean(T_e_array)
 
 
 # # 3. Make a harmonically varying Te map (same as Kalousova)
@@ -170,20 +175,77 @@ theta_range = np.linspace(0, 180, 2*(lmax+1)+1)
 #         T_e_I.append(transition_T_e_I[i])
 # T_e_I = np.array(T_e_I)
 # T_e_array = np.tile(T_e_I.reshape(-1, 1), (1, 4*(lmax+1)+1))
-# T_e_mean = np.mean(T_e_array)
 
 
 # 4. Make harmonic T_e distribution - Model III of Kalousova
 T_e_type = 'Harmonic_TeMap_MIII'
 T_e_III = 100e3 + 50e3*np.cos(10*np.radians(theta_range))
 T_e_array = np.tile(T_e_III.reshape(-1, 1), (1, 4*(lmax+1)+1))
-T_e_mean = np.mean(T_e_array)
 
 
 
 # Convert to pyshtools classes
 T_e_grid = pysh.SHGrid.from_array(T_e_array)
-T_e_coeffs = T_e_grid.expand()
+T_e_clm = T_e_grid.expand()
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+## ROTATE COEFFICIENTS OF Te, TOPO AND GEOID TO CHECK CODE
+
+if Rotated == True:
+    # Store original topography and Te
+    topo_grid_org = topo_clm.expand()
+    T_e_grid_org = T_e_grid
+    
+    # Set rotation matrix dj and define rotation function for shift to polar view
+    dj = pysh.rotate.djpi2(lmax)
+    def Rot90deg(clm, dj):
+        angles = (0, np.pi/2, 0)
+        return pysh.rotate.SHRotateRealCoef(clm, angles, dj)
+    
+    # Create 90 deg rotated coefficients of all input maps
+    topo_clm = pysh.SHCoeffs.from_array(Rot90deg(topo_clm.coeffs, dj))
+    geoid_clm = pysh.SHCoeffs.from_array(Rot90deg(geoid_clm.coeffs, dj))
+    T_e_clm = pysh.SHCoeffs.from_array(Rot90deg(T_e_clm.coeffs, dj))
+    
+    # Expand to grids for computations and plots
+    geoid_grid = geoid_clm.expand()
+    T_e_grid = T_e_clm.expand()
+    T_e_array = T_e_grid.data
+    topo_grid = topo_clm.expand()
+    
+# Plot the original and rotated topography and Te maps
+fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 9))
+
+if Rotated == True:
+    topo_grid_org.plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label='w [m]')
+else:
+    topo_clm.expand().plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label='w [m]')
+ax1.set_title('Topography original')
+if Rotated == True:
+    topo_grid.plot(ax=ax2, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    ax2.set_title('Topography rotated 90 deg')
+else:
+    topo_clm.expand().plot(ax=ax2, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    ax2.set_title('Topography (no rotation applied)')
+if Rotated == True:
+    T_e_grid_org.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label='w [m]')
+else:
+    T_e_grid.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label='w [m]')
+ax3.set_title('Te original')
+T_e_grid.plot(ax=ax4, cmap=mycmap, colorbar='right', cb_label='w [m]')
+if Rotated == True:
+    ax4.set_title('Te rotated 90 deg')
+else:
+    ax4.set_title('Te (no rotation applied)')
+    
+plt.tight_layout()
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/InputTopoTe_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/InputTopoTe_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
+plt.show()
+
+# %% BEUTHE FUNCTIONS
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ####################################################
@@ -261,7 +323,7 @@ def get_numeric_gaunt(l1, l2, l3, m1, m2, m3):
         return 0.0
     w3j_0 = w3j_0_array[l1 - jmin_0]
     
-    factor = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) * (2 * l3 + 1) / (4.0 * np.pi))  # Is the convention right here????
+    factor = np.sqrt((2 * l1 + 1) * (2 * l2 + 1) * (2 * l3 + 1) / (4.0 * np.pi))  
     return factor * w3j_m * w3j_0
 
 
@@ -286,7 +348,7 @@ def _decompose_real_sh(l, m):
                 ( absm, -(-1)**absm * 1j / np.sqrt(2))]
 
 
-_sqrt4pi = np.sqrt(4.0 * np.pi)   # BUG 1 + BUG 3 normalisation factor
+_sqrt4pi = np.sqrt(4.0 * np.pi)
 
 
 def get_real_gaunt(l_out, m_out, L, M, l_prime, m_prime):
@@ -320,6 +382,8 @@ def get_real_gaunt(l_out, m_out, L, M, l_prime, m_prime):
     return total.real * _sqrt4pi  # imaginary part is exactly 0 for real SH
 
 
+# %% TURCOTTE FUNCTIONS
+
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #############################################################
@@ -343,6 +407,8 @@ def C_l_functional(l_val, nu, E, T_e_local, Re, rho_m, rho_c, g0):
 # Pre-calculate the density-ratio term
 rho_term = -rho_c / (rho_m - rho_c)
 
+# %% BEUTHE SYSTEM SOLVER
+
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #########################################################################
@@ -365,7 +431,7 @@ N_modes = len(mode_map)
 print(f"\n--- Starting Pure Numeric Matrix Generation (lmax = {lmax}) ---")
 
 # Set the T_e average value and reference radius Re based on average T_e
-T_e_0 = np.mean(T_e_array)
+T_e_0 = T_e_clm.coeffs[0,0,0]
 Re = R - T_e_0/2
     
 # Precalculate the buoyancy term used in Matrix A, and the two scaling factors 
@@ -389,7 +455,7 @@ alm_unstr = pysh.shio.SHCilmToVector(a_clm.coeffs)
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-print("Initializing sparse matrix buffers...")
+print("Initializing sparse matrices...")
 diag_a = np.zeros(N_modes, dtype=np.float64)
 diag_b = np.zeros(N_modes, dtype=np.float64)
 
@@ -410,7 +476,9 @@ matrix_B_sparse = sparse.lil_matrix((N_modes, N_modes), dtype=np.float64)
 print("Assembling coupling combinations across spectral elements...")
 
 for i, (l_val, m_val) in enumerate(mode_map):
-    for j, (l_prime, m_prime) in enumerate(mode_map):
+    # Since Matrix A and B are symmetric over the diagonal (A[i,j] = A[j,i]),
+    # start the below loop for j >= i only
+    for j, (l_prime, m_prime) in enumerate(mode_map[i:], start=i): 
         cell_sum_A = 0.0
         cell_sum_B = 0.0
         
@@ -423,35 +491,43 @@ for i, (l_val, m_val) in enumerate(mode_map):
             
             w_coef_A = W_numeric_A(l_val, l_prime, L, nu)
             w_coef_B = W_numeric_B(l_val, l_prime, L, nu)
-            if w_coef_A == 0.0 or w_coef_B == 0:     
+            if w_coef_A == 0.0 and w_coef_B == 0:     
                 continue
             
             for M in range(-L, L + 1):
                 q_val = get_real_gaunt(l_val, m_val, L, M, l_prime, m_prime)
-                if q_val == 0.0:
+                if q_val <= 1.0e-10:
                     continue
                 
                 D_val = float(find_custom_element(L, M, Dlm_unstr))
                 a_val = float(find_custom_element(L, M, alm_unstr))
 
-                cell_sum_A += w_coef_A * D_val * q_val 
-                cell_sum_B += w_coef_B * a_val * q_val
-        
-                # print(f"\nl,m={l_val, m_val}, l',m'={l_prime, m_prime}, L,M={L,M}")
-                # print(f'w_coef_A = {w_coef_A}')
-                # print(f'D_val = {D_val}')
-                # print(f'q_val = {q_val}')
+                if w_coef_A != 0.0:
+                    cell_sum_A += w_coef_A * D_val * q_val 
+                if w_coef_B != 0.0: 
+                    cell_sum_B += w_coef_B * a_val * q_val
+                    
                 
         val_A = cell_sum_A * scaler_A
         val_B = cell_sum_B * scaler_B
         
-        if l_val == l_prime and m_val == m_prime:
-            val_A += buoy
-            
+        if i == j:
+            val_A += buoy            # Buoyancy term only on diagonal
         if val_A != 0.0:
             matrix_A_sparse[i, j] = val_A
+            if i != j: matrix_A_sparse[j, i] = val_A   # Due to symmetry
         if val_B != 0.0:
             matrix_B_sparse[i, j] = val_B
+            if i != j: matrix_B_sparse[j, i] = val_B   # Due to symmetry
+        
+        
+        # if l_val == l_prime and m_val == m_prime:
+        #     val_A += buoy
+            
+        # if val_A != 0.0:
+        #     matrix_A_sparse[i, j] = val_A
+        # if val_B != 0.0:
+        #     matrix_B_sparse[i, j] = val_B
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -511,7 +587,9 @@ w_sol_clm_beuthe = pysh.SHCoeffs.from_array(w_coeffs_np, normalization='4pi')
 w_sol_grid_beuthe = w_sol_clm_beuthe.expand()
 
 
+# %% TURCOTTE CONSTANT TE MODEL SOLVER
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
 ###################################################
 ### SOLVE THE TURCOTTE CONSTANT Te DISPLACEMENT ###
 ###################################################
@@ -530,7 +608,7 @@ w_sol_clm_turcotte  = pysh.SHCoeffs.from_array(w_coeffs_turcotte, normalization=
 w_sol_grid_turcotte = w_sol_clm_turcotte.expand()
 
 
-# %%
+# %% TURCOTTE VARIABLE TE MODEL SOLVER
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -574,6 +652,11 @@ Te_grid_data = T_e_grid.data   # shape (nlat, nlon)
 # Shape: (lmax+1, nlat, nlon)  -- C_l varies spatially for variable-Te case.
 # For large grids/lmax this can be memory-intensive; compute on-the-fly instead.
 
+# Vectorised: compute C_l for every Te value in the grid at once.
+tau_grid   = E * Te_grid_data / (Re**2 * (rho_m - rho_c) * g0)
+sigma_grid = tau_grid / (12*(1 - nu**2)) * (Te_grid_data / Re)**2
+
+
 # w_varTe_data = np.zeros((nlat, nlon))
 w_varTe_coeffs = np.zeros((2, lmax+1, lmax+1))
 
@@ -586,9 +669,6 @@ for l_val in range(2, lmax+1):
     h_l_grid    = load_l_clm.expand().data   # shape (nlat, nlon)
 
     # --- pointwise C_l using the local Te ---
-    # Vectorised: compute C_l for every Te value in the grid at once.
-    tau_grid   = E * Te_grid_data / (Re**2 * (rho_m - rho_c) * g0)
-    sigma_grid = tau_grid / (12*(1 - nu**2)) * (Te_grid_data / Re)**2
     d_b1       = (l_val**3*(l_val+1)**3
                   - 4*l_val**2*(l_val+1)**2
                   + 4*l_val*(l_val+1))
@@ -614,12 +694,14 @@ w_sol_clm_turcotteV  = pysh.SHCoeffs.from_array(w_varTe_coeffs, normalization='4
 w_sol_grid_turcotteV = w_sol_clm_turcotteV.expand()
 
 
-# %%
+# %% PLOTTING
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #########################################################
 ### PLOT 2D MAPS AND POWER SPECTRA OF DISPLACEMENTS W ###
 #########################################################
 os.makedirs('Plots/M1VarD_SPEC_opt results/', exist_ok=True)
+os.makedirs('Plots/M1VarD_SPEC_opt Rotations results/', exist_ok=True)
+
 
 print("Plotting input Te map, flexural rigidity D and parameter alpha")
 fig2, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
@@ -627,7 +709,10 @@ T_e_grid.plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label= 'Synthetic T_e ma
 D_grid.plot(ax=ax2, cmap=mycmap, colorbar='right', cb_label= 'Synthetic D map')
 a_grid.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label= 'Synthetic alpha map') 
 plt.tight_layout()
-if Save_Figs: plt.savefig(f'Plots/M1VarD_SPEC_opt results/InputTe_{T_e_type}_lmax{lmax}.png', dpi=200)
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/InputTe_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/InputTe_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
 plt.show()
 
 
@@ -640,7 +725,10 @@ ax2.set_title(f"Power Spectrum of displacement w Turcotte Constant (Te = {T_e_ty
 (w_sol_clm_beuthe/w_sol_clm_turcotte).plot_spectrum(show=False, ax=ax3, yscale='lin')
 ax3.set_title("Ratio of Power Spectra of displacement w (B-T)")
 plt.tight_layout()
-if Save_Figs: plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra1D_{T_e_type}_lmax{lmax}.png', dpi=200)
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra1D_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/PowerSpectra1D_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
 plt.show()
 
 
@@ -653,7 +741,10 @@ ax2.set_title(f"Power Spectrum of displacement w Turcotte Variable (Te = {T_e_ty
 (w_sol_clm_beuthe/w_sol_clm_turcotteV).plot_spectrum(show=False, ax=ax3, yscale='lin')
 ax3.set_title("Ratio of Power Spectra of displacement w (B-Tv)")
 plt.tight_layout()
-if Save_Figs: plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra1D_Var_{T_e_type}_lmax{lmax}.png', dpi=200)
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra1D_Var_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/PowerSpectra1D_Var_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
 plt.show()
 
 
@@ -666,7 +757,10 @@ ax2.set_title(f"Power Spectrum of displacement w Turcotte Constant (Te = {T_e_ty
 (w_sol_clm_beuthe - w_sol_clm_turcotte).plot_spectrum2d(show=False, ax=ax3, cmap_rlimits=(1e-7, 1))
 ax3.set_title("Residual Power Spectrum of displacement w (B-T)")
 plt.tight_layout()
-if Save_Figs: plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra2D_{T_e_type}_lmax{lmax}.png', dpi=200)
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra2D_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/PowerSpectra2D_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
 plt.show()
 
 
@@ -679,7 +773,10 @@ ax2.set_title(f"Power Spectrum of displacement w Turcotte Variable (Te = {T_e_ty
 (w_sol_clm_beuthe - w_sol_clm_turcotteV).plot_spectrum2d(show=False, ax=ax3, cmap_rlimits=(1e-7, 1))
 ax3.set_title("Residual Power Spectrum of displacement w (B-Tv)")
 plt.tight_layout()
-if Save_Figs: plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra2D_{T_e_type}_lmax{lmax}.png', dpi=200)
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/PowerSpectra2D_Var_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/PowerSpectra2D_Var_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
 plt.show()
 
 
@@ -699,7 +796,7 @@ ax1.set_title(f'TSA-B  Beuthe model solution (Te = {T_e_type})')
 ax1.contour(w_sol_grid_beuthe.data > 0, levels=[0.99], extent=(0, 360, -90, 90), colors="k", origin="upper")
 
 w_sol_grid_turcotte.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label='w [km]')
-ax3.set_title(f'TSA-T  Turcotte constant (Te = {T_e_mean/1e3:.0f} km)')
+ax3.set_title(f'TSA-T  Turcotte constant (Te = {T_e_0/1e3:.0f} km)')
 ax3.contour(w_sol_grid_turcotte.data > 0, levels=[0.99], extent=(0, 360, -90, 90), colors="k", origin="upper")
 
 w_sol_grid_turcotteV.plot(ax=ax5, cmap=mycmap, colorbar='right', cb_label='w [km]')
@@ -720,7 +817,11 @@ diff_grid_BTv.plot(ax=ax6, cmap=mycmap, colorbar='right', cb_label='Misfit [m]')
 ax6.set_title('Residual TSA-B − TSA-Tv')
 
 plt.tight_layout()
-if Save_Figs: plt.savefig(f'Plots/M1VarD_SPEC_opt results/DeflectionMap2D_{T_e_type}_lmax{lmax}.png', dpi=200)
+if Save_Figs == True and Rotated_SaveFig == False: 
+    plt.savefig(f'Plots/M1VarD_SPEC_opt results/DeflectionMap2D_{T_e_type}_lmax{lmax}.png', dpi=200)
+elif Save_Figs == True and Rotated_SaveFig == True:
+    plt.savefig(f'Plots/M1VarD_SPEC_opt Rotations results/DeflectionMap2D_Rot={Rotated}_{T_e_type}_lmax{lmax}.png', dpi=200)
+
 plt.show()
 
 
