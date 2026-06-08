@@ -9,10 +9,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pyshtools as pysh
 from palettable import scientific as scm
+from cmcrameri import cm
 import scipy.sparse as sparse
 import scipy.sparse.linalg as spla
 import time
 import os
+import pandas as pd
+import pickle 
 
 start = time.time()
 
@@ -80,13 +83,21 @@ dp = 0          # Crustal density variations delta rho (used in Banerdt)
 M = 0           # Thickness of density anomaly in mantle
 
 # Set maximum spherical harmonic degree to perform all calculations
-lmax = 25  
+lmax = 40  
+
+# Initialize a coefficient shape for cosine-sine format as used in pyshtools
+shape = (2, lmax + 1, lmax + 1)
 
 # Set whether rotation of inputs is applied or not - Verification method
-Rotated = True
+Rotated = False
 Rotated_SaveFig = False
 # Set whether output figures are saved or not
 Save_Figs = False
+
+# Set color maps
+cmap1 = scm.diverging.Vik_20.mpl_colormap
+cmap2 = cm.davos
+
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ## Load in topography and gravity data
@@ -104,19 +115,58 @@ percent_C20 = 0.0
 topo_clm.coeffs[0, 2, 0] = (percent_C20 / 100.0) * topo_clm.coeffs[0, 2, 0]
 geoid_clm.coeffs[0, 2, 0] = (percent_C20 / 100.0) * geoid_clm.coeffs[0, 2, 0]
 
-
-# Constants
+# CONSTANTS
 G = pysh.constants.G.value  # Gravitational constant
 gm = pot_clm.gm  # GM given in the gravity model file
 mass = gm / G  # Mass of the planet
 g0 = gm / R**2  # Mean gravitational attraction of the planet
 
 
-# Set color map
-mycmap = scm.diverging.Vik_20.mpl_colormap
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+# Load in an elastic thickness input map
+Te_inputs_subfolder = "Elastic Thickness Input Maps/"
+Te_file_path = f"{Te_inputs_subfolder}grl58258-sup-0002-data set 1.dat"
 
-shape = (2, lmax + 1, lmax + 1)
+df = pd.read_csv(
+    Te_file_path, 
+    sep='\s+',
+    comment='#',
+    header=None,
+    names=['longitude', 'latitude', 'crustal_thickness_km',
+           'heat_flow_mW_m2', 'Te_1e-14_km', 'Te_1e-17_km',
+           'T_150km_K', 'depth_1370K_km'],
+    usecols=['longitude', 'latitude', 'Te_1e-14_km', 'Te_1e-17_km']
+)
 
+# # Check whether data format is collected correctly
+# print(df.head())
+# print(df.shape)
+
+# Extract data as arrays
+lon      = df['longitude'].values
+lat      = df['latitude'].values
+Te_14    = (df['Te_1e-14_km'].values)*1e3   # Convert to m
+Te_17    = (df['Te_1e-17_km'].values)*1e3   # Convert to m
+
+# Find precision of latitude and longitude values
+n_lat = len(np.unique(lat))
+n_lon = len(np.unique(lon))
+
+# Reshaping the data, running from:
+    # longitude: +90deg to +89deg (so +90 to +359, then 0 to +89)
+    # latitude:  +90deg to -89deg (which aligns with colatitude 0-180)
+lon_grid    = lon.reshape(n_lat, n_lon)
+lat_grid    = lat.reshape(n_lat, n_lon)
+Te_14_grid  = Te_14.reshape(n_lat, n_lon)
+Te_17_grid  = Te_17.reshape(n_lat, n_lon)
+
+# Shift all grids left so columns start at lon = 0.
+# Set shift-value to the found index of the column where lon = 0
+shift        = np.argmin(lon_grid[0]) 
+lon_grid     = np.roll(lon_grid,   -shift, axis=1)
+lat_grid     = np.roll(lat_grid,   -shift, axis=1)
+Te_14_array  = np.roll(Te_14_grid, -shift, axis=1)
+Te_17_array  = np.roll(Te_17_grid, -shift, axis=1)
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ############################################
@@ -177,62 +227,129 @@ theta_range = np.linspace(0, 180, 2*(lmax+1)+1)
 # T_e_array = np.tile(T_e_I.reshape(-1, 1), (1, 4*(lmax+1)+1))
 
 
-# 4. Make harmonic T_e distribution - Model III of Kalousova
-T_e_type = 'Harmonic_TeMap_MIII'
-T_e_III = 100e3 + 50e3*np.cos(10*np.radians(theta_range))
-T_e_array = np.tile(T_e_III.reshape(-1, 1), (1, 4*(lmax+1)+1))
+# # 4.a Make harmonic T_e distribution - Model III of Kalousova - latitudinal
+# T_e_type = 'Harmonic_TeMap_MIIIa'
+# T_e_III = 100e3 + 50e3*np.cos(10*np.radians(theta_range))
+# T_e_array = np.tile(T_e_III.reshape(-1, 1), (1, 4*(lmax+1)+1))
 
 
+# # 4.b Make harmonic T_e distribution - Model III of Kalousova - longitudinal
+# phi_range = np.linspace(0, 360, 4*(lmax+1)+1)
+# T_e_type = 'Harmonic_TeMap_MIIIb'
+# T_e_IIIa = 100e3 + 50e3*np.cos(10*np.radians(theta_range))
+# T_e_IIIb = 100e3 + 50e3*np.cos(25*np.radians(phi_range))
+# T_e_arraya = np.tile(T_e_IIIa.reshape(-1, 1), (1, 4*(lmax+1)+1))
+# T_e_arrayb = np.tile(T_e_IIIb, (2*(lmax+1)+1, 1))
+# T_e_array = T_e_arraya + T_e_arrayb
 
-# Convert to pyshtools classes
+
+# # Convert to pyshtools classes
+# T_e_grid = pysh.SHGrid.from_array(T_e_array)
+# T_e_clm = T_e_grid.expand() 
+
+
+# 5. Use an input elastic thickness map
+# Choose which Plesa et al. (2018) map based on the strain rate:
+    # (1e-14 1/s or 1e-17 1/s)
+strain = 1e-14
+
+T_e_type = 'Input_TeMap_Plesa2018'
+if strain == 1e-14: 
+    T_e_array = Te_14_array     # Plesa et al. (2018) Te map of strain rate 1e-14
+elif strain == 1e-17:
+    T_e_array = Te_17_array     # Plesa et al. (2018) Te map of strain rate 1e-17 
+
+# Dynamically compute Flexural Rigidity D and Alpha maps for this specific profile
+D_array = E * T_e_array**3 / (12 * (1 - nu**2))
+a_array = 1.0 / (E * T_e_array)
+
+D_grid = pysh.SHGrid.from_array(D_array, grid='DH')
+a_grid = pysh.SHGrid.from_array(a_array, grid='DH')
+
+D_clm  = D_grid.expand(normalization='4pi')
+a_clm  = a_grid.expand(normalization='4pi')
+
 T_e_grid = pysh.SHGrid.from_array(T_e_array)
 T_e_clm = T_e_grid.expand()
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-## ROTATE COEFFICIENTS OF Te, TOPO AND GEOID TO CHECK CODE
+## ROTATE COEFFICIENTS OF Te, TOPO AND GEOID TO VERIFY CODE
 
 if Rotated == True:
     # Store original topography and Te
     topo_grid_org = topo_clm.expand()
-    T_e_grid_org = T_e_grid
+    T_e_grid_org = pysh.SHGrid.from_array(T_e_array)
     
-    # Set rotation matrix dj and define rotation function for shift to polar view
-    dj = pysh.rotate.djpi2(lmax)
     def Rot90deg(clm, dj):
         angles = (0, np.pi/2, 0)
         return pysh.rotate.SHRotateRealCoef(clm, angles, dj)
     
-    # Create 90 deg rotated coefficients of all input maps
-    topo_clm = pysh.SHCoeffs.from_array(Rot90deg(topo_clm.coeffs, dj))
-    geoid_clm = pysh.SHCoeffs.from_array(Rot90deg(geoid_clm.coeffs, dj))
-    T_e_clm = pysh.SHCoeffs.from_array(Rot90deg(T_e_clm.coeffs, dj))
-    
+    # Set rotation matrix dj and define rotation function for shift to polar view
+    if T_e_type == 'Input_TeMap_Plesa2018':
+        # Input Te map has different lmax than input Topo map
+        # To make sure that rotation occurs correctly, create separate rotation 
+        # matrices for the two types, and truncate only after rotations are done
+        dj_topo = pysh.rotate.djpi2(lmax)
+        dj_Te   = pysh.rotate.djpi2(T_e_grid_org.lmax)
+        
+        # Create 90 deg rotated coefficients of all input maps
+        topo_clm = pysh.SHCoeffs.from_array(Rot90deg(topo_clm.coeffs, dj_topo))
+        geoid_clm = pysh.SHCoeffs.from_array(Rot90deg(geoid_clm.coeffs, dj_topo))
+        T_e_clm = pysh.SHCoeffs.from_array(Rot90deg(T_e_clm.coeffs, dj_Te))
+        D_clm = pysh.SHCoeffs.from_array(Rot90deg(D_clm.coeffs, dj_Te))
+        a_clm = pysh.SHCoeffs.from_array(Rot90deg(a_clm.coeffs, dj_Te))
+        
+    else:
+        dj = pysh.rotate.djpi2(lmax)
+
+        # Create 90 deg rotated coefficients of all input maps
+        topo_clm = pysh.SHCoeffs.from_array(Rot90deg(topo_clm.coeffs, dj))
+        geoid_clm = pysh.SHCoeffs.from_array(Rot90deg(geoid_clm.coeffs, dj))
+        T_e_clm = pysh.SHCoeffs.from_array(Rot90deg(T_e_clm.coeffs, dj))
+        D_clm = pysh.SHCoeffs.from_array(Rot90deg(D_clm.coeffs, dj))
+        a_clm = pysh.SHCoeffs.from_array(Rot90deg(a_clm.coeffs, dj))
+        
     # Expand to grids for computations and plots
     geoid_grid = geoid_clm.expand()
-    T_e_grid = T_e_clm.expand()
-    T_e_array = T_e_grid.data
-    topo_grid = topo_clm.expand()
+    T_e_grid   = T_e_clm.expand()
+    topo_grid  = topo_clm.expand()
+    D_grid     = D_clm.expand()
+    a_grid     = a_clm.expand()
+        
+# Truncate Te, D and a to lmax sizes for grid and clm terms
+# T_e_clm.pad(lmax)
+# T_e_grid       = pysh.SHCoeffs.from_array(
+                    # T_e_clm.coeffs[:, :lmax+1, :lmax+1]).expand()
+# D_clm.pad(lmax)
+# D_grid         = pysh.SHCoeffs.from_array(
+#                     D_clm.coeffs[:, :lmax+1, :lmax+1]).expand()
+# a_clm.pad(lmax)
+# a_grid         = pysh.SHCoeffs.from_array(
+#                     a_clm.coeffs[:, :lmax+1, :lmax+1]).expand()
+
+
     
+
 # Plot the original and rotated topography and Te maps
 fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 9))
 
 if Rotated == True:
-    topo_grid_org.plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    topo_grid_org.plot(ax=ax1, cmap=cmap1, colorbar='right', cb_label='w [m]')
 else:
-    topo_clm.expand().plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    topo_clm.expand().plot(ax=ax1, cmap=cmap1, colorbar='right', cb_label='w [m]')
 ax1.set_title('Topography original')
 if Rotated == True:
-    topo_grid.plot(ax=ax2, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    topo_grid.plot(ax=ax2, cmap=cmap1, colorbar='right', cb_label='w [m]')
     ax2.set_title('Topography rotated 90 deg')
 else:
-    topo_clm.expand().plot(ax=ax2, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    topo_clm.expand().plot(ax=ax2, cmap=cmap1, colorbar='right', cb_label='w [m]')
     ax2.set_title('Topography (no rotation applied)')
 if Rotated == True:
-    T_e_grid_org.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    T_e_grid_org.plot(ax=ax3, cmap=cmap2, colorbar='right', cb_label='w [m]')
 else:
-    T_e_grid.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label='w [m]')
+    T_e_grid.plot(ax=ax3, cmap=cmap2, colorbar='right', cb_label='w [m]')
 ax3.set_title('Te original')
-T_e_grid.plot(ax=ax4, cmap=mycmap, colorbar='right', cb_label='w [m]')
+T_e_grid.plot(ax=ax4, cmap=cmap2, colorbar='right', cb_label='w [m]')
 if Rotated == True:
     ax4.set_title('Te rotated 90 deg')
 else:
@@ -384,7 +501,6 @@ def get_real_gaunt(l_out, m_out, L, M, l_prime, m_prime):
 
 # %% TURCOTTE FUNCTIONS
 
-
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #############################################################
 ### DEFINE TURCOTTE EQUATION FOR VARIABLE THICKNESS SHELL ###
@@ -392,7 +508,6 @@ def get_real_gaunt(l_out, m_out, L, M, l_prime, m_prime):
 
 # Simplified form of constant thickness thin shell approximation applied to a 
 # shell of variable thickness, following Kalousova et al. (2012) definition
-
 def C_l_functional(l_val, nu, E, T_e_local, Re, rho_m, rho_c, g0):
     tau   = E * T_e_local / (Re**2 * (rho_m - rho_c) * g0)
     sigma = tau / (12*(1 - nu**2)) * (T_e_local / Re)**2
@@ -407,8 +522,7 @@ def C_l_functional(l_val, nu, E, T_e_local, Re, rho_m, rho_c, g0):
 # Pre-calculate the density-ratio term
 rho_term = -rho_c / (rho_m - rho_c)
 
-# %% BEUTHE SYSTEM SOLVER
-
+# %% BEUTHE SYSTEM SOLVER INITIALIZATIONS
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #########################################################################
@@ -440,15 +554,7 @@ buoy = (Re / T_e_0)**3 * (Re / E) * g0 * (rho_m - rho_c)
 scaler_A = 1.0 / (E * T_e_0**3)
 scaler_B = Re
 
-# Dynamically compute Flexural Rigidity D and Alpha maps for this specific profile
-D_array = E * T_e_array**3 / (12 * (1 - nu**2))
-a_array = 1.0 / (E * T_e_array)
 
-D_grid = pysh.SHGrid.from_array(D_array)
-a_grid = pysh.SHGrid.from_array(a_array)
-
-D_clm = D_grid.expand(normalization='4pi')
-a_clm = a_grid.expand(normalization='4pi')
 
 Dlm_unstr = pysh.shio.SHCilmToVector(D_clm.coeffs)
 alm_unstr = pysh.shio.SHCilmToVector(a_clm.coeffs)
@@ -471,64 +577,179 @@ matrix_b_l_sparse = sparse.diags(diag_b, format="lil")
 matrix_A_sparse = sparse.lil_matrix((N_modes, N_modes), dtype=np.float64)
 matrix_B_sparse = sparse.lil_matrix((N_modes, N_modes), dtype=np.float64)
 
+
+
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+# Pre-extract D / alpha coefficient slices per degree L
+# One array of length (2L+1) per L, indexed M = -L … +L.
+# Avoids repeated find_custom_element() calls inside the fill loop.
+D_slices = {}
+a_slices = {}
+for L in range(lmax + 1):
+    block = L * L
+    idx_list = [0 if M == 0 else (M if M > 0 else L + abs(M))
+                for M in range(-L, L + 1)]
+    flat_idx = np.array([block + off for off in idx_list], dtype=np.int32)
+    D_slices[L] = Dlm_unstr[flat_idx]
+    a_slices[L] = alm_unstr[flat_idx]
 
-print("Assembling coupling combinations across spectral elements...")
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+# %% GAUNT COEFFICIENT TABLES PRE-CALCULATION OR LOADING
+"""
+The Gaunt coefficient calculations in the main Beuthe loop take by far the 
+longest time to calculate, which explodes when increasing lmax.
+Since these values only depend on lmax (specifically l, l', L, m, m' M, which
+are defined up to lmax) and the Poisson's ratio nu, these values can be 
+precalculated, stored in a subfolder of this repository, and loaded for 
+specific lmax and Poisson's ratios.
 
-for i, (l_val, m_val) in enumerate(mode_map):
-    # Since Matrix A and B are symmetric over the diagonal (A[i,j] = A[j,i]),
-    # start the below loop for j >= i only
-    for j, (l_prime, m_prime) in enumerate(mode_map[i:], start=i): 
-        cell_sum_A = 0.0
-        cell_sum_B = 0.0
-        
-        min_L = abs(l_val - l_prime)
-        max_L = min(l_val + l_prime, lmax)
-        
-        for L in range(min_L, max_L + 1):
-            if (l_val + l_prime + L) % 2 != 0:
-                continue
-            
-            w_coef_A = W_numeric_A(l_val, l_prime, L, nu)
-            w_coef_B = W_numeric_B(l_val, l_prime, L, nu)
-            if w_coef_A == 0.0 and w_coef_B == 0:     
-                continue
-            
-            for M in range(-L, L + 1):
-                q_val = get_real_gaunt(l_val, m_val, L, M, l_prime, m_prime)
-                if q_val <= 1.0e-10:
+This section precomputes the non-zero coefficients if they do not exist yet,
+or loads them from the cache directory otherwise. 
+
+Note: the first time computing these coefficients for a certain lmax takes 
+very long (~12 hours for lmax = 50).
+"""
+
+# Make/identify gaunt cache directory to save or load gaunt coefficient tables
+CACHE_DIR = "gaunt_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+plan_path = os.path.join(CACHE_DIR, f"gaunt_plan_lmax{lmax}_nu{nu:.4f}.pkl")
+
+# Load a Gaunt plan if it exists in the cache
+if os.path.exists(plan_path):
+    print(f"Loading Gaunt plan from cache: {plan_path}")
+    t_load = time.perf_counter()
+    with open(plan_path, 'rb') as fh:
+        cached = pickle.load(fh)
+    assembly_plan = cached['plan']
+    print(f"  Loaded {len(assembly_plan):,} entries in "
+          f"{time.perf_counter()-t_load:.2f}s")
+
+# If not existing yet, calculate all the coefficients and save them to cache
+else:
+    print(f"Building Gaunt plan (first run for this lmax (={lmax}) — will be cached)...")
+    t_build = time.perf_counter()
+    assembly_plan = []
+
+    for i, (l_val, m_val) in enumerate(mode_map):
+        for j, (l_prime, m_prime) in enumerate(mode_map[i:], start=i):
+            L_entries = []
+            min_L = abs(l_val - l_prime)
+            max_L = min(l_val + l_prime, lmax)
+
+            for L in range(min_L, max_L + 1):
+                if (l_val + l_prime + L) % 2 != 0:
                     continue
-                
-                D_val = float(find_custom_element(L, M, Dlm_unstr))
-                a_val = float(find_custom_element(L, M, alm_unstr))
+                w_coef_A = W_numeric_A(l_val, l_prime, L, nu)
+                w_coef_B = W_numeric_B(l_val, l_prime, L, nu)
+                if w_coef_A == 0.0 and w_coef_B == 0.0:
+                    continue
 
-                if w_coef_A != 0.0:
-                    cell_sum_A += w_coef_A * D_val * q_val 
-                if w_coef_B != 0.0: 
-                    cell_sum_B += w_coef_B * a_val * q_val
+                # Evaluate Gaunt for all M at once, keep only nonzero (nz) values
+                M_vals = np.arange(-L, L + 1)
+                q_vals = np.array([get_real_gaunt(l_val, m_val, L, M, l_prime, m_prime)
+                                   for M in M_vals])
+                nz_mask = np.abs(q_vals) > 1e-10
+                if not np.any(nz_mask):
+                    continue
+
+                # Store (M_offset_into_slice, w_coef_A*q, w_coef_B*q) for the nonzero M
+                M_offsets = np.where(nz_mask)[0].astype(np.int16)
+                wAq = (w_coef_A * q_vals[nz_mask]).astype(np.float32)
+                wBq = (w_coef_B * q_vals[nz_mask]).astype(np.float32)
+                L_entries.append((L, M_offsets, wAq, wBq))
+
+            if L_entries:
+                assembly_plan.append((i, j, L_entries))
+
+    build_time = time.perf_counter() - t_build
+    print(f"  Built {len(assembly_plan):,} entries in {build_time:.1f}s — saving...")
+    with open(plan_path, 'wb') as fh:
+        pickle.dump({'lmax': lmax, 'nu': nu, 'plan': assembly_plan}, fh,
+                    protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  Saved to {plan_path}  "
+          f"({os.path.getsize(plan_path)/1e6:.1f} MB)")
+
+print("Assembling coupling matrices (plan + BLAS dot)...")
+t_fill = time.perf_counter()
+
+
+
+for i, j, L_entries in assembly_plan:
+    cell_A = 0.0
+    cell_B = 0.0
+    for L, M_offsets, wAq, wBq in L_entries:
+        D_sel = D_slices[L][M_offsets]
+        a_sel = a_slices[L][M_offsets]
+        cell_A += float(np.dot(D_sel, wAq))   # BLAS dot — no Python loop
+        cell_B += float(np.dot(a_sel, wBq))
+
+    val_A = cell_A * scaler_A + (buoy if i == j else 0.0)
+    val_B = cell_B * scaler_B
+
+    if val_A != 0.0:
+        matrix_A_sparse[i, j] = val_A
+        if i != j:
+            matrix_A_sparse[j, i] = val_A      # OPT-3: symmetry copy
+    if val_B != 0.0:
+        matrix_B_sparse[i, j] = val_B
+        if i != j:
+            matrix_B_sparse[j, i] = val_B      # OPT-3: symmetry copy
+
+print(f"  Matrix fill: {time.perf_counter()-t_fill:.2f}s")
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+# %% BEUTHE SYSTEM SOLVER LOOPS
+
+# print("Assembling coupling combinations across spectral elements...")
+
+# for i, (l_val, m_val) in enumerate(mode_map):
+#     # Since Matrix A and B are symmetric over the diagonal (A[i,j] = A[j,i]),
+#     # start the below loop for j >= i only
+#     for j, (l_prime, m_prime) in enumerate(mode_map[i:], start=i): 
+#         cell_sum_A = 0.0
+#         cell_sum_B = 0.0
+        
+#         min_L = abs(l_val - l_prime)
+#         max_L = min(l_val + l_prime, lmax)
+        
+    
+#         for L in range(min_L, max_L + 1):
+#             if (l_val + l_prime + L) % 2 != 0:
+#                 continue
+            
+#             w_coef_A = W_numeric_A(l_val, l_prime, L, nu)
+#             w_coef_B = W_numeric_B(l_val, l_prime, L, nu)
+#             if w_coef_A == 0.0 and w_coef_B == 0:     
+#                 continue
+            
+#             for M in range(-L, L + 1):
+#                 q_val = get_real_gaunt(l_val, m_val, L, M, l_prime, m_prime)
+#                 if abs(q_val) <= 1.0e-10:
+#                     continue
+                
+#                 D_val = float(find_custom_element(L, M, Dlm_unstr))
+#                 a_val = float(find_custom_element(L, M, alm_unstr))
+
+#                 if w_coef_A != 0.0:
+#                     cell_sum_A += w_coef_A * D_val * q_val 
+#                 if w_coef_B != 0.0: 
+#                     cell_sum_B += w_coef_B * a_val * q_val
                     
                 
-        val_A = cell_sum_A * scaler_A
-        val_B = cell_sum_B * scaler_B
+#         val_A = cell_sum_A * scaler_A
+#         val_B = cell_sum_B * scaler_B
         
-        if i == j:
-            val_A += buoy            # Buoyancy term only on diagonal
-        if val_A != 0.0:
-            matrix_A_sparse[i, j] = val_A
-            if i != j: matrix_A_sparse[j, i] = val_A   # Due to symmetry
-        if val_B != 0.0:
-            matrix_B_sparse[i, j] = val_B
-            if i != j: matrix_B_sparse[j, i] = val_B   # Due to symmetry
-        
-        
-        # if l_val == l_prime and m_val == m_prime:
-        #     val_A += buoy
-            
-        # if val_A != 0.0:
-        #     matrix_A_sparse[i, j] = val_A
-        # if val_B != 0.0:
-        #     matrix_B_sparse[i, j] = val_B
+#         if i == j:
+#             val_A += buoy            # Buoyancy term only on diagonal
+#         if val_A != 0.0:
+#             matrix_A_sparse[i, j] = val_A
+#             if i != j: matrix_A_sparse[j, i] = val_A   # Due to symmetry
+#         if val_B != 0.0:
+#             matrix_B_sparse[i, j] = val_B
+#             if i != j: matrix_B_sparse[j, i] = val_B   # Due to symmetry
 
+# # Make a dense version of Matrix A to check off-diagonal terms manually
+# matrix_A_dense = (matrix_A_sparse.todense())
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 ##################################################################
@@ -646,15 +867,16 @@ load_grid_full = load_clm.expand()
 nlat, nlon = load_grid_full.data.shape
 
 # Te grid on the same (nlat, nlon) Driscoll-Healy grid
-Te_grid_data = T_e_grid.data   # shape (nlat, nlon)
-
+T_e_grid_data = pysh.SHCoeffs.from_array(
+                     T_e_clm.coeffs[:, :lmax+1, :lmax+1]).expand().data
+                    
 # Pre-compute C_l(Te) at every grid point for every degree l.
 # Shape: (lmax+1, nlat, nlon)  -- C_l varies spatially for variable-Te case.
 # For large grids/lmax this can be memory-intensive; compute on-the-fly instead.
 
 # Vectorised: compute C_l for every Te value in the grid at once.
-tau_grid   = E * Te_grid_data / (Re**2 * (rho_m - rho_c) * g0)
-sigma_grid = tau_grid / (12*(1 - nu**2)) * (Te_grid_data / Re)**2
+tau_grid   = E * T_e_grid_data / (Re**2 * (rho_m - rho_c) * g0)
+sigma_grid = tau_grid / (12*(1 - nu**2)) * (T_e_grid_data / Re)**2
 
 
 # w_varTe_data = np.zeros((nlat, nlon))
@@ -694,6 +916,20 @@ w_sol_clm_turcotteV  = pysh.SHCoeffs.from_array(w_varTe_coeffs, normalization='4
 w_sol_grid_turcotteV = w_sol_clm_turcotteV.expand()
 
 
+# %%
+
+# Save the current Beuthe solution vector 
+w_sol_clm_beuthe.to_file(f'w_beuthe_Rot={Rotated}_lmax={lmax}')
+
+# Load a Beuthe solution vector to overlay in 1D power spectrum plot
+w_sol_clm_loaded1 = pysh.SHCoeffs.from_file('w_beuthe_Rot=True_lmax=25')
+w_sol_clm_loaded2 = pysh.SHCoeffs.from_file('w_beuthe_Rot=False_lmax=25')
+w_sol_clm_loaded3 = pysh.SHCoeffs.from_file('w_beuthe_Rot=True_lmax=35')
+w_sol_clm_loaded4 = pysh.SHCoeffs.from_file('w_beuthe_Rot=False_lmax=35')
+w_sol_clm_loaded5 = pysh.SHCoeffs.from_file('w_beuthe_Rot=True_lmax=30')
+w_sol_clm_loaded6 = pysh.SHCoeffs.from_file('w_beuthe_Rot=False_lmax=30')
+w_sol_clm_loaded7 = pysh.SHCoeffs.from_file('w_beuthe_Rot=True_lmax=40')
+
 # %% PLOTTING
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 #########################################################
@@ -705,9 +941,9 @@ os.makedirs('Plots/M1VarD_SPEC_opt Rotations results/', exist_ok=True)
 
 print("Plotting input Te map, flexural rigidity D and parameter alpha")
 fig2, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
-T_e_grid.plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label= 'Synthetic T_e map, m')
-D_grid.plot(ax=ax2, cmap=mycmap, colorbar='right', cb_label= 'Synthetic D map')
-a_grid.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label= 'Synthetic alpha map') 
+T_e_grid.plot(ax=ax1, cmap=cmap2, colorbar='right', cb_label= 'Synthetic T_e map, m')
+D_grid.plot(ax=ax2, cmap=cmap2, colorbar='right', cb_label= 'Synthetic D map')
+a_grid.plot(ax=ax3, cmap=cmap2, colorbar='right', cb_label= 'Synthetic alpha map') 
 plt.tight_layout()
 if Save_Figs == True and Rotated_SaveFig == False: 
     plt.savefig(f'Plots/M1VarD_SPEC_opt results/InputTe_{T_e_type}_lmax{lmax}.png', dpi=200)
@@ -718,7 +954,15 @@ plt.show()
 
 print("Plotting 1D power spectra ratios of w - constant")
 fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
-w_sol_clm_beuthe.plot_spectrum(show=False, ax=ax1)
+w_sol_clm_beuthe.plot_spectrum(show=False, ax=ax1, legend=f'Current w_sol Beuthe (Rot={Rotated}, lmax={lmax})')
+w_sol_clm_loaded7.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=40)')
+w_sol_clm_loaded5.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=30)')
+w_sol_clm_loaded6.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=False, lmax=30)')
+w_sol_clm_loaded1.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=25)')
+w_sol_clm_loaded2.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=False, lmax=25)')
+w_sol_clm_loaded3.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=35)')
+w_sol_clm_loaded4.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=False, lmax=35)')
+ax1.legend()
 ax1.set_title(f"Power Spectrum of displacement w Beuthe (Te = {T_e_type}) ")
 w_sol_clm_turcotte.plot_spectrum(show=False, ax=ax2)
 ax2.set_title(f"Power Spectrum of displacement w Turcotte Constant (Te = {T_e_type})")
@@ -734,7 +978,15 @@ plt.show()
 
 print("Plotting 1D power spectra ratios of w - variable")
 fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
-w_sol_clm_beuthe.plot_spectrum(show=False, ax=ax1)
+w_sol_clm_beuthe.plot_spectrum(show=False, ax=ax1, legend=f'Current w_sol Beuthe (Rot={Rotated}, lmax={lmax})')
+w_sol_clm_loaded7.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=40)')
+w_sol_clm_loaded5.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=30)')
+w_sol_clm_loaded6.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=False, lmax=30)')
+w_sol_clm_loaded1.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=25)')
+w_sol_clm_loaded2.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=False, lmax=25)')
+w_sol_clm_loaded3.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=True, lmax=35)')
+w_sol_clm_loaded4.plot_spectrum(show=False, ax=ax1, legend='Loaded w_sol Beuthe (Rot=False, lmax=35)')
+ax1.legend()
 ax1.set_title(f"Power Spectrum of displacement w Beuthe (Te = {T_e_type}) ")
 w_sol_clm_turcotteV.plot_spectrum(show=False, ax=ax2)
 ax2.set_title(f"Power Spectrum of displacement w Turcotte Variable (Te = {T_e_type})")
@@ -785,21 +1037,18 @@ w_sol_grid_beuthe.data = w_sol_grid_beuthe.data/1e3
 w_sol_grid_turcotte.data = w_sol_grid_turcotte.data/1e3
 w_sol_grid_turcotteV.data = w_sol_grid_turcotteV.data/1e3
 
-
-
-
 print("Plotting 2D deflection maps")
 fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(13, 10))
 ax2.set_visible(False)
-w_sol_grid_beuthe.plot(ax=ax1, cmap=mycmap, colorbar='right', cb_label='w [km]')
+w_sol_grid_beuthe.plot(ax=ax1, cmap=cmap1, colorbar='right', cb_label='w [km]')
 ax1.set_title(f'TSA-B  Beuthe model solution (Te = {T_e_type})')
 ax1.contour(w_sol_grid_beuthe.data > 0, levels=[0.99], extent=(0, 360, -90, 90), colors="k", origin="upper")
 
-w_sol_grid_turcotte.plot(ax=ax3, cmap=mycmap, colorbar='right', cb_label='w [km]')
+w_sol_grid_turcotte.plot(ax=ax3, cmap=cmap1, colorbar='right', cb_label='w [km]')
 ax3.set_title(f'TSA-T  Turcotte constant (Te = {T_e_0/1e3:.0f} km)')
 ax3.contour(w_sol_grid_turcotte.data > 0, levels=[0.99], extent=(0, 360, -90, 90), colors="k", origin="upper")
 
-w_sol_grid_turcotteV.plot(ax=ax5, cmap=mycmap, colorbar='right', cb_label='w [km]')
+w_sol_grid_turcotteV.plot(ax=ax5, cmap=cmap1, colorbar='right', cb_label='w [km]')
 ax5.set_title(f'TSA-T  Turcotte variable (Te = {T_e_type})')
 ax5.contour(w_sol_grid_turcotteV.data > 0, levels=[0.99], extent=(0, 360, -90, 90), colors="k", origin="upper")
 
@@ -809,11 +1058,11 @@ w_sol_grid_turcotte.data = w_sol_grid_turcotte.data*1e3
 w_sol_grid_turcotteV.data = w_sol_grid_turcotteV.data*1e3
 
 diff_grid_BT = w_sol_grid_beuthe - w_sol_grid_turcotte
-diff_grid_BT.plot(ax=ax4, cmap=mycmap, colorbar='right', cb_label='Misfit [m]')
+diff_grid_BT.plot(ax=ax4, cmap=cmap1, colorbar='right', cb_label='Misfit [m]')
 ax4.set_title('Residual TSA-B − TSA-T')
 
 diff_grid_BTv = w_sol_grid_beuthe - w_sol_grid_turcotteV
-diff_grid_BTv.plot(ax=ax6, cmap=mycmap, colorbar='right', cb_label='Misfit [m]')
+diff_grid_BTv.plot(ax=ax6, cmap=cmap1, colorbar='right', cb_label='Misfit [m]')
 ax6.set_title('Residual TSA-B − TSA-Tv')
 
 plt.tight_layout()
@@ -825,8 +1074,11 @@ elif Save_Figs == True and Rotated_SaveFig == True:
 plt.show()
 
 
+
+
+
+
 end = time.time()
 print("\n--- Entire Model Run Complete ---")
 print("Total runtime:", round(end - start, 1), "seconds")
 
-matrix_A_dense = (matrix_A_sparse.todense())
