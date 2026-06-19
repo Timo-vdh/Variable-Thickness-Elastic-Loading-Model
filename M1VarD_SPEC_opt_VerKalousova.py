@@ -100,7 +100,7 @@ theta_range = np.linspace(0, 180, 2*(lmax+1)+1)
 T_e_I = []
 start_trans = 80
 stop_trans = 100
-phi = np.pi * (theta_range - start_trans)/(100 - start_trans)
+phi = np.pi * (theta_range - start_trans)/(stop_trans - start_trans)
 transition_T_e_I = 125e3 + 75e3*np.cos(phi)
 
 for i, theta in enumerate(theta_range):
