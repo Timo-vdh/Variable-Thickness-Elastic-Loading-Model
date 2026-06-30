@@ -3,9 +3,12 @@
 Beuthe (2008) variable-thickness flexure solver — Model 1 (M1)
 
 Model for the variable thickness deformations of a thin elastic spherical shell.
-Current model works with Beuthe's equations 75 and 76. 
+Current model (M1) works with:
+    - Beuthe (2008)'s equations 75 and 76 for the vertical displacement w and the 
+      stress function F. 
+
 Model 1 does not include:
-    - Tangential loading (Omega=V=0)
+    - Any tangential loading (Omega=V=0)
     - Geoid self-consistency solving
     - Crustal thickness variations
     - Mantle density variations
@@ -30,9 +33,9 @@ from concurrent.futures import ProcessPoolExecutor
 
 nu, E      = 0.25, 100.0e9
 rho_c, rho_m = 2900., 3500.
-LMAX_RUNS  = [25]        # last entry is the reference resolution
-rotate_angles = (0.0, 90.0, 30.0)
-lmax_Te_fit = 30
+LMAX_RUNS  = [40, 45]        # last entry is the reference resolution
+rotate_angles = (0.0, 0.0, 0.0)
+lmax_Te_fit = 45
 CACHE_DIR  = "gaunt_cache"
 cmap1 = scm.diverging.Vik_20.mpl_colormap
 cmap2 = cm.davos
@@ -255,7 +258,9 @@ def _cM_to_indices(cM, L):
 def get_real_gaunt_slice(l_out, m_out, L, l_prime, m_prime):
     """
     Optimized computation of the Gaunt coefficients. Instead of looping over
-    all complex orders 
+    all complex orders cM, now feed only those cM values that agree with the 
+    selection rule for orders (m1+m2+m3=0). Drastically reduced number of 
+    Wigner3j calls.
     All M in [-L,L] at once; <=4 Wigner3j calls. Index k <-> M = k-L.
     """
     res = np.zeros(2*L+1, dtype=np.complex128)
@@ -310,7 +315,6 @@ def get_real_gaunt_slice(l_out, m_out, L, l_prime, m_prime):
             # specific combination of l_out, m_out and l_prime, m_prime
             for idx, cL in _cM_to_indices(cM, L):
                 res[idx] += c_out*cL*c_prime*gaunt
-    
     # Return the final Gaunt value in real domain and 4pi normalized
     return res.real*_sqrt4pi
 
@@ -421,7 +425,9 @@ plus np.add.reduceat -- no Python loop over terms (that loop was the lmax=50
 """
 
 def flatten_plan(assembly_plan):
-    """Convert nested [(i,j,[(L,off,wA,wB),...])] -> 8 flat arrays (see header)."""
+    """
+    Convert nested [(i,j,[(L,off,wA,wB),...])] -> 8 flat arrays (see header).
+    """
     cell_i, cell_j, cell_start = [], [], []
     term_L, term_off, term_wA, term_wB = [], [], [], []
     cur = 0
@@ -447,6 +453,9 @@ def flatten_plan(assembly_plan):
     }
 
 def save_plan_soa(plan, lmax, nu, path):
+    """ 
+    Save SoA plan to directory.
+    """
     np.savez(path, lmax=np.int64(lmax), nu=np.float64(nu), **plan)
 
 def load_plan_soa(path):
@@ -459,8 +468,10 @@ def load_plan_soa(path):
 
 
 def _build_chunk_flat(args):
-    """Build outer indices [i_lo, i_hi) and return FLAT arrays for that chunk.
-    Returns a dict of 7 arrays (no sentinel here; the parent stitches starts)."""
+    """
+    Build outer indices [i_lo, i_hi) and return FLAT arrays for that chunk.
+    Returns a dict of 7 arrays (no sentinel here; the parent stitches starts).
+    """
     i_lo, i_hi, lmax, nu = args
     mode_map = make_mode_map(lmax)
     Nmode = len(mode_map)
@@ -690,10 +701,10 @@ if __name__ == "__main__":
                                 (f', rotated {rotate_angles}' 
                                  if rotation else '')), 
                             plot_dict={'linestyle': linestyle})
-    ax.set_title('Power spectra of w (Beuthe-model, Plesa Te Map, M1)')
+    ax.set_title('M1 - Power spectra of w (Beuthe-model, Plesa Te Map, M1)')
     ax.legend(); plt.tight_layout()
     if SaveFigs:
-        plt1_title = (f'Power spectra w, M1, lmax_run={LMAX_RUNS}, '
+        plt1_title = (f'M1 - Power spectra w, lmax_run={LMAX_RUNS}, '
                       f'lmaxTe={lmax_Te_fit}'
                       + (f', rotated {rotate_angles}' if rotation else '') 
                       + '.png')
@@ -720,10 +731,10 @@ if __name__ == "__main__":
                          linestyle=linestyle)
         ax2.set_xlabel('degree l'); ax2.set_ylabel(r'$|S_l/S_l^{ref}-1|$*100%')
         ax2.legend(); ax2.grid(True)
-        ax2.set_title(f'Residual vs lmax_ref={LMAX_REF}')
+        ax2.set_title(f'M1 - Residual vs lmax_ref={LMAX_REF}')
         plt.tight_layout(); 
         if SaveFigs:
-            plt2_title = (f'Residuals w power, M1, lmax_run={LMAX_RUNS}, '
+            plt2_title = (f'M1 - Residuals w power, lmax_run={LMAX_RUNS}, '
                           f'lmaxTe={lmax_Te_fit}'
                           + (f', rotated {rotate_angles}' if rotation else '') 
                           + '.png')
@@ -747,23 +758,23 @@ if __name__ == "__main__":
                        cmap=cmap2, 
                        colorbar='right', 
                        cb_label=r'$T_e \ [m]$')
-    ax1.set_title(f'Te input map (Plesa et al. 2018), exp. to lmax={lmax_Te_fit}'
+    ax1.set_title(f'M1 - Te input map (Plesa et al. 2018), exp. to lmax={lmax_Te_fit}'
                   + (f', rot={rotate_angles}' if rotation else ''))
     D_use_clm.expand(lmax=lmax_Te_fit).plot(ax=ax2, 
                                         cmap=cmap2, 
                                         colorbar='right', 
                                         cb_label=r'$D \ [N\cdot m]$')  
-    ax2.set_title(f'Flexural rigidity D (Te-derived), exp. to lmax={lmax_Te_fit}'
+    ax2.set_title(f'M1 - Flexural rigidity D (Te-derived), exp. to lmax={lmax_Te_fit}'
                   + (f', rot={rotate_angles}' if rotation else ''))
     a_use_clm.expand(lmax=lmax_Te_fit).plot(ax=ax3, 
                                         cmap=cmap2, 
                                         colorbar='right', 
                                         cb_label=r'$E \ [m/N$]') 
-    ax3.set_title(f'Parameter alpha (Te-derived), exp. to lmax={lmax_Te_fit}'
+    ax3.set_title(f'M1 - Parameter alpha (Te-derived), exp. to lmax={lmax_Te_fit}'
                   + (f', rot={rotate_angles}' if rotation else ''))
     plt.tight_layout()
     if SaveFigs:
-        plt3_title = (f'Inputs Te, D and alpha, M1, lmax_run={LMAX_RUNS}, '
+        plt3_title = (f'M1 - Inputs Te, D and alpha, lmax_run={LMAX_RUNS}, '
                       f'lmaxTe={lmax_Te_fit}'
                       + (f', rotated {rotate_angles}' if rotation else '') 
                       + '.png')
@@ -794,8 +805,10 @@ if __name__ == "__main__":
             
     if len(LMAX_RUNS)>1:
         fig3, (a1,a2) = plt.subplots(2,1, figsize=(12,10))
-        w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]')
-        a1.set_title(f'Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
+        w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]', 
+                    # cmap_limits=[-24,11],
+                    )
+        a1.set_title(f'M1 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
                      + (f', rot={rotate_angles}' if rotation else ''))
 
         a1.contour(w_fine.data>0, 
@@ -803,14 +816,16 @@ if __name__ == "__main__":
                    extent=(0,360,-90,90), 
                    colors='k', 
                    origin='upper')
-        w_diff.plot(ax=a2, cmap=cmap1, colorbar='right', cb_label='w diff [m]')
-        a2.set_title(f'Residual w: lmax={LMAX_REF} minus lmax={lo}'
+        w_diff.plot(ax=a2, cmap=cmap1, colorbar='right', cb_label='w diff [m]', 
+                    # cmap_limits=[-320,200],
+                    )
+        a2.set_title(f'M1 - Residual w: lmax={LMAX_REF} minus lmax={lo}'
                      + (f', rot={rotate_angles}' if rotation else ''))
         
     else:
         fig3, a1 = plt.subplots(figsize=(12,10))
         w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]')
-        a1.set_title(f'Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
+        a1.set_title(f'M1 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
                      + (f', rot={rotate_angles}' if rotation else ''))
 
         a1.contour(w_fine.data>0, 
@@ -821,7 +836,7 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     if SaveFigs:
-        plt4_title = (f'Displacement w 2D map, M1, lmax_run={LMAX_RUNS}, '
+        plt4_title = (f'M1 - Displacement w 2D map, lmax_run={LMAX_RUNS}, '
                       f'lmaxTe={lmax_Te_fit}'
                       + (f', rotated {rotate_angles}' if rotation else '') 
                       + '.png')
@@ -830,4 +845,4 @@ if __name__ == "__main__":
         print(f"Saved Figures to subfolder: {SavePath}")
     plt.show(); plt.close()
 
-print(f'\nTotal model runtime: {time.perf_counter() - t_begin}s')
+    print(f'\nTotal model runtime: {(time.perf_counter() - t_begin):.1f}s')
