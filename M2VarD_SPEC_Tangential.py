@@ -1426,6 +1426,45 @@ if __name__ == "__main__":
     plt.show(); plt.close()
 
 
+# %%
+
+
+    # Residual map between M1 and M2
+    w_M1 = pysh.SHGrid.from_file('M1_result_files/M1_w_expandedto45_pySHGrid_lmax=45_rot=False_lmaxTeFit=45')
+    w_M1_lmax = 45
+    rotate_angles_M1 = (0.0, 0.0, 0.0)
+    fig, (ax1, ax2, ax3) = plt.subplots(3,1, figsize=(12,10))
+    w_M1.plot(ax=ax1, cmap=cmap1, colorbar='right', cb_label='w [km]')
+    ax1.set_title(f'M1 - Transverse displacement w Beuthe-model (lmax={w_M1_lmax})'
+                 + (f', rot={rotate_angles_M1}' if rotation else ''))
+    ax1.contour(w_M1.data>0, 
+               levels=[0.99], 
+               extent=(0,360,-90,90), 
+               colors='k', 
+               origin='upper')
+
+    w_fine.plot(ax=ax2, cmap=cmap1, colorbar='right', cb_label='w [km]')
+    ax2.set_title(f'M2 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
+                 + (f', rot={rotate_angles}' if rotation else ''))
+    ax2.contour(w_fine.data>0, 
+               levels=[0.99], 
+               extent=(0,360,-90,90), 
+               colors='k', 
+               origin='upper')
+
+    w_diff_M1M2 = w_M1.copy()
+    w_diff_M1M2.data = w_M1.data - w_fine.data
+    w_diff_M1M2.plot(ax=ax3, cmap=cmap1, colorbar='right', cb_label='w [km]')
+    ax3.set_title('Transverse displacement w residual M1 - M2')
+    # a3.contour(w_fine.data>0, 
+    #            levels=[0.99], 
+    #            extent=(0,360,-90,90), 
+    #            colors='k', 
+    #            origin='upper')
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+# %%
 
 
     # 2D Omega map + Omega power spectrum
@@ -1446,6 +1485,11 @@ if __name__ == "__main__":
                     )
     plt.tight_layout()
     plt.show()
+
+
+    w_fine.to_file(f'M2_result_files/M2_w_expandedto{w_fine.lmax}_pySHGrid_lmax={LMAX_REF}_'
+                   f'rot={do_rotation_check}_lmaxTeFit={lmax_Te_fit}')
+
 
     print(f'\nTotal model runtime: {(time.perf_counter() - t_begin):.1f}s')
     

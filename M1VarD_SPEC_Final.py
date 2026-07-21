@@ -845,4 +845,10 @@ if __name__ == "__main__":
         print(f"Saved Figures to subfolder: {SavePath}")
     plt.show(); plt.close()
 
+# %%
+
+
+    w_fine.to_file(f'M1_result_files/M1_w_expandedto{w_fine.lmax}_pySHGrid_lmax={LMAX_REF}_'
+                   f'rot={do_rotation_check}_lmaxTeFit={lmax_Te_fit}')
+
     print(f'\nTotal model runtime: {(time.perf_counter() - t_begin):.1f}s')
