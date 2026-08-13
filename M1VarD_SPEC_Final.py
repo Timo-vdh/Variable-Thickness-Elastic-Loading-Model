@@ -72,7 +72,7 @@ def load_Temap(lmax_Te_fit, strain=14):
     specifically the Te map from a strain rate of 1e-14 1/s. 
     A 1e-17 1/s strain rate Te map is also available
     """
-    subfolder_Te_maps = "Elastic Thickness Input Maps"
+    subfolder_Te_maps = "Elastic_Thickness_Input_Maps"
     Te_filename = "grl58258-sup-0002-data_set_1.dat"
     Te_file_path = os.path.join(subfolder_Te_maps, Te_filename)
     df = pd.read_csv(Te_file_path, sep=r'\s+', comment='#',

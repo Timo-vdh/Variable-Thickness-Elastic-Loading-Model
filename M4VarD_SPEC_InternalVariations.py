@@ -12,10 +12,12 @@ Current model (M4) works with:
       loading potential Omega (with zero dc and zero drho).
     - Geoid self-consistency solving
     - Crustal root variations
-    - Mantle density variations
+    - Mantle density variations (no iterating corrections!)
 
 Model 4 does not include:
-    - Toroidal loading (V=0)
+    - Toroidal loading (V=0 & T=0)
+    - Iterations for redistributions due to internal density variations
+    - Iterations for finite amplitude corrections
 
 Following Beuthe's model requires implementation of the differential operator 
 A(a;b). Beuthe (2008) does not give a spectral method for this, but in Beuthe
@@ -56,7 +58,7 @@ rho_c = 2900.0
 rho_m = 3500.0
 drho = rho_m - rho_c
 drhol = rho_c - rho_l
-T_c = 50e3                 # Arbitrary crustal thickness value, TBC
+T_c = 60.0e3                 # Arbitrary crustal thickness value, TBC
 Te_input = 268.12e3
 
 # Top and bottom depth of density variations drho_lm
@@ -65,7 +67,10 @@ Mb = T_c
 
 
 LMAX_RUNS  = [45]        # last entry is the reference resolution
-rotate_angles = (20.0, 43.0, 80.0)
+LMAX_REF = max(LMAX_RUNS)
+grid_expansion_res = LMAX_REF * 3
+
+rotate_angles = (0.0, 0.0, 0.0)
 lmax_Te_fit = LMAX_RUNS[-1]
 CACHE_DIR  = "gaunt_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -74,7 +79,6 @@ cmap1 = scm.diverging.Vik_20.mpl_colormap
 cmap2 = cmc.broc
 cmap3 = cmc.roma_r
 
-omega_On = True
 strain = 0      # Set which Te map is used, strain-14, strain-17, or
                  # strain-0 (returns constant Te map with Te=Te_input)
 
@@ -85,7 +89,8 @@ solve_for = 'dc_lm'
 
 
 SaveFigs = False
-SavePath = "Plots/M4VarD_SPEC_FinalPlots"
+SavePath = "Plots/M4VarD_SPEC_FinalPlots"        # If on own laptop
+# SavePath = "/home/vand_t1/Documents/Figures_M4"  # If on DLR computer
 os.makedirs(SavePath, exist_ok=True)
 
 # %% BASIC FUNCTION DEFINITIONS
@@ -116,13 +121,13 @@ def load_Temap(lmax_Te_fit, strain=14):
     specifically the Te map from a strain rate of 1e-14 1/s. 
     A 1e-17 1/s strain rate Te map is also available
     """
-    subfolder_Te_maps = "Elastic Thickness Input Maps"
+    subfolder_Te_maps = "Elastic_Thickness_Input_Maps"
     Te_filename = "grl58258-sup-0002-data_set_1.dat"
     Te_file_path = os.path.join(subfolder_Te_maps, Te_filename)
     df = pd.read_csv(Te_file_path, sep=r'\s+', comment='#',
                      header=None,
                      names=['longitude','latitude','crustal_thickness_km',
-                            'heat_flow_mW_M3','Te_1e-14_km','Te_1e-17_km',
+                            'heat_flow_mW_M4','Te_1e-14_km','Te_1e-17_km',
                             'T_150km_K','depth_1370km_km'],
                      usecols=['longitude','latitude','Te_1e-14_km','Te_1e-17_km'])
     Te_14 = df['Te_1e-14_km'].values*1e3
@@ -185,11 +190,11 @@ def load_inputs(lmax, strain=14):
 def derive_D_a(T_e_parent, lmax):
     """
     Compute the flexural rigidity D and parameter alpha using the parent Te.
-    Function first expands the parent Te map to a fine grid of 3*lmax, which
-    is then used to compute D and alpha coefficients. D and alpha are then
-    truncated to 2*lmax+1 because the coupling coefficients contain degrees
-    up to the sum of two input degrees (the sum over LM goes from l-l' to l+l',
-    i.e. 2*l).
+    Function first expands the parent Te map to a finer grid of 
+    grid_expansion_res, which is then used to compute D and alpha coefficients. 
+    D and alpha are then truncated to 2*lmax+1 because the coupling coefficients 
+    contain degrees up to the sum of two input degrees (the sum over LM goes 
+    from l-l' to l+l', i.e. 2*l).
 
     ETA_FULL extension (Beuthe eqs 58/66, unsimplified): additionally returns
     the eta-weighted fields (eta*D, eta*alpha) -- used by the A/B operator
@@ -270,7 +275,7 @@ def rotate_inputs(rot_angles, T_e_parent, D_clm, a_clm, topo_clm, geoid_clm):
 
     return T_e_parent, D_clm, a_clm, topo_clm, geoid_clm
 
-# %% drho_lm HELPER FUNCTIONS
+# %% drho_lm HELPER FUNCTION
 
 def drho_layer(lmax, R, g0, mass):
     """
@@ -319,18 +324,6 @@ def drho_layer(lmax, R, g0, mass):
     B_2 = Cp * Rl3 * (RtRCl - RbRCl)
 
     return dict(M=M, g_M=g_M, B_1=B_1, B_2=B_2, Cp=Cp, Rl3=Rl3, rhobar=rhobar)
-
-
-def Phat_grid(T_e_parent_grid, g_M, M):
-    """
-    DSP eq-(5) drhom weight (mass_correc = 1 at nmax=1):
-        Phat = -0.5*v1v*gdrho*(Te - Mt)*min(M, Te - Mt) , gated to 0 if Mt >= Te
-    Returned as a GRID (it is Te-dependent -> a genuine spatial field).
-    """
-    TeMt   = T_e_parent_grid - Mt
-    TeMt0  = np.where(TeMt > 0.0, TeMt, 0.0)          # max(Te-Mt, 0)
-    minMTe = np.minimum(TeMt, M)                      # min(M, Te-Mt)
-    return -0.5 * nu/(1-nu) * g_M * TeMt0 * minMTe
 
 
 # %% GAUNT FUNCTIONS
@@ -479,7 +472,7 @@ def get_real_gaunt_slice(l_out, m_out, L, l_prime, m_prime):
     """
     Optimized computation of the Gaunt coefficients. Instead of looping over
     all complex orders cM, now feed only those cM values that agree with the 
-    selection rule for orders (m1+m2+m3=0). Drastically reduced number of 
+    selection rule for orders (m1+m2+M4=0). Drastically reduced number of 
     Wigner3j calls.
     All M in [-L,L] at once; <=4 Wigner3j calls. Index k <-> M = k-L.
     """
@@ -769,8 +762,9 @@ def build_or_load_gaunt(lmax, nu, nproc=16):
     building, or prevent overloading of computer.
     """
     
-    path = os.path.join(CACHE_DIR, f"gaunt_plan_v4_lmax{lmax}_nu{nu:.4f}_tangential.npz")
+    path = os.path.join(CACHE_DIR, f"gaunt_plan_v4_lmax{lmax}_nu{nu:.4f}.npz")
     if os.path.exists(path):
+        print(f"Start loading in SoA plan, lmax={lmax}")
         t = time.perf_counter()
         plan = load_plan_soa(path)
         print(f"Loaded SoA plan lmax={lmax}: {plan['cell_i'].size:,} cells, "
@@ -809,7 +803,8 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     # Thin-shell correction factors
     eps0  = 12.0*Re**2/T_e_0**2
     eta0  = eps0/(1.0 + eps0)
-    corr1 = eta0*Re/R
+    # corr1 = eta0*Re/R
+    corr1 = Re/R        # ETA FIELD FIX
     
     # Laplacian array for degrees
     lap_by_degree = np.array([-l * (l + 1) for l in range(2 * lmax + 1)])
@@ -822,36 +817,36 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     
     
     # ------- PRECOMPUTED SH-MULTIPLIED FIELDS -------    
-    T_e_parent_grid = T_e_parent.expand(lmax=3*lmax).data
-    topo_grid = topo_clm.expand(lmax=3*lmax).data - R
-    geoid_grid = geoid_clm.expand(lmax=3*lmax).data - R
-    Te2_grid = T_e_parent_grid**2    
+    T_e_parent_grid_eq1RHS = T_e_parent.expand(lmax=grid_expansion_res).data
+    topo_grid_eq1RHS = topo_clm.expand(lmax=grid_expansion_res).data - R
+    geoid_grid_eq1RHS = geoid_clm.expand(lmax=grid_expansion_res).data - R
+    Te2_grid = T_e_parent_grid_eq1RHS**2    
     
     # max(Te - Tc, 0) field
-    TeTc_grid = T_e_parent_grid - T_c
+    TeTc_grid = T_e_parent_grid_eq1RHS - T_c
     # If a value is below 0, set to 0 to apply the 'max' call
     TeTc_grid_data = np.array(TeTc_grid.data)
     TeTc_grid_data[TeTc_grid_data < 0.0] = 0  
     TeTc_grid = pysh.SHGrid.from_array(TeTc_grid_data).data
      
     # pre-weighted topo  H' = H / phi^(l+2)
-    Hp = pysh.SHGrid.from_array(topo_grid).expand()
+    Hp = pysh.SHGrid.from_array(topo_grid_eq1RHS).expand()
     Hp = pysh.SHCoeffs.from_array(Hp.coeffs[:, :2*lmax+1, :2*lmax+1])
     for l in range(Hp.coeffs.shape[1]):
         Hp.coeffs[:, l, :] *= 1.0 / RTcR_l2[l]
-    Hp_grid = Hp.expand(lmax=3*lmax).data
+    Hp_grid = Hp.expand(lmax=grid_expansion_res).data
     
     # pre-weighted geoid  G' = rhobar(2l+1)/phi^(l+2) * G
-    Gp = pysh.SHGrid.from_array(geoid_grid).expand()
+    Gp = pysh.SHGrid.from_array(geoid_grid_eq1RHS).expand()
     Gp = pysh.SHCoeffs.from_array(Gp.coeffs[:, :2*lmax+1, :2*lmax+1])
     for l in range(Gp.coeffs.shape[1]):
         Gp.coeffs[:, l, :] *= rhobar2l1[l] / RTcR_l2[l]
-    Gp_grid = Gp.expand(lmax=3*lmax).data
+    Gp_grid = Gp.expand(lmax=grid_expansion_res).data
     
     
     # ------- THE FIELDS FOR EACH TERM -------
     # Field RHS 1a: Te*H grid
-    TeH_grid = T_e_parent_grid * topo_grid
+    TeH_grid = T_e_parent_grid_eq1RHS * topo_grid_eq1RHS
     TeH_clm = pysh.SHGrid.from_array(TeH_grid).expand()
     TeH_clm = pysh.SHCoeffs.from_array(TeH_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
     
@@ -860,7 +855,7 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     TeH_lap = TeH_clm.copy()
     for l in range(TeH_lap.coeffs.shape[1]):
         TeH_lap.coeffs[:, l, :] *= lap_by_degree[l]
-    TeH_lap_grid = TeH_lap.expand(lmax=3*lmax)
+    TeH_lap_grid = TeH_lap.expand(lmax=grid_expansion_res)
     TeH_lap_Te2_grid = TeH_lap_grid.data * Te2_grid.data
     TeH_lap_Te2_clm = pysh.SHGrid.from_array(TeH_lap_Te2_grid).expand()
     
@@ -875,7 +870,7 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     tmp = dc1_clm.copy()
     for l in range(tmp.coeffs.shape[1]):
         tmp.coeffs[:, l, :] *= lap_by_degree[l]
-    dc2_clm = pysh.SHGrid.from_array(Te2_grid.data * tmp.expand(lmax=3*lmax).data).expand()
+    dc2_clm = pysh.SHGrid.from_array(Te2_grid.data * tmp.expand(lmax=grid_expansion_res).data).expand()
     dc2_clm = pysh.SHCoeffs.from_array(dc2_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
      
     # dc3 :  max * G'   
@@ -888,7 +883,7 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     tmp = dc3_clm.copy()
     for l in range(tmp.coeffs.shape[1]):
         tmp.coeffs[:, l, :] *= lap_by_degree[l]
-    dc4_clm = pysh.SHGrid.from_array(Te2_grid.data * tmp.expand(lmax=3*lmax).data).expand()
+    dc4_clm = pysh.SHGrid.from_array(Te2_grid.data * tmp.expand(lmax=grid_expansion_res).data).expand()
     dc4_clm = pysh.SHCoeffs.from_array(dc4_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
     
     
@@ -900,7 +895,7 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     B_1   = _dl['B_1']
     Cp    = _dl['Cp']
     # Te-dependent layer fields (kept local: they need T_e_parent_grid)
-    TeMt_grid  = T_e_parent_grid - Mt
+    TeMt_grid  = T_e_parent_grid_eq1RHS - Mt
     TeMt0      = np.array(TeMt_grid.data)
     TeMt0[TeMt0 < 0.0] = 0.0                       # max(Te - Mt, 0)
     MTeMt      = np.array(TeMt_grid.data)
@@ -937,7 +932,7 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
         weighted_coeffs = pysh.SHCoeffs.from_array(np.array(source_coeffs.coeffs[:, :2*lmax+1, :2*lmax+1]))
         for l in range(weighted_coeffs.coeffs.shape[1]):
             weighted_coeffs.coeffs[:, l, :] *= weights[l]
-        return weighted_coeffs.expand(lmax=3*lmax).data
+        return weighted_coeffs.expand(lmax=grid_expansion_res).data
     
     def _c1_c2(prod_grid):
         """
@@ -951,7 +946,7 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
         lap = pysh.SHCoeffs.from_array(np.array(p_clm.coeffs))
         for l in range(lap.coeffs.shape[1]):
             lap.coeffs[:, l, :] *= lap_by_degree[l]
-        lap_g = Te2_grid.data * lap.expand(lmax=3*lmax).data
+        lap_g = Te2_grid.data * lap.expand(lmax=grid_expansion_res).data
         lap_clm = pysh.SHGrid.from_array(lap_g).expand()
         lap_clm = pysh.SHCoeffs.from_array(lap_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
         return p_clm, lap_clm
@@ -961,8 +956,8 @@ def Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, lmax, R, T_e_0, Re, g0, mass)
     # degree-weights for two G-field terms
     wG_drho = np.array([ 1.0 / B_1[l]   for l in range(2*lmax+1)])
     
-    _topo_clm  = pysh.SHGrid.from_array(topo_grid).expand()
-    _geoid_clm = pysh.SHGrid.from_array(geoid_grid).expand()
+    _topo_clm  = pysh.SHGrid.from_array(topo_grid_eq1RHS).expand()
+    _geoid_clm = pysh.SHGrid.from_array(geoid_grid_eq1RHS).expand()
     field_drho1, field_drho2 = _c1_c2(Phat_g * _drhom_part(_topo_clm,  wH_drho))
     field_drho3, field_drho4 = _c1_c2(Phat_g * _drhom_part(_geoid_clm, wG_drho))
 
@@ -1027,23 +1022,24 @@ def Omega_eq1_LHS(T_e_parent, lmax, R, T_e_0, Re, g0, mass):
     # Thin-shell approximations/corrections
     eps0  = 12.0*Re**2/T_e_0**2
     eta0  = eps0/(1.0 + eps0)
-    corr1 = eta0*Re/R
+    # corr1 = eta0*Re/R
+    corr1 = Re/R            # ETA FIELD FIX
     
     # ------- PRECOMPUTED SH-MULTIPLIED FIELDS -------   
-    T_e_parent_grid = T_e_parent.expand(lmax=3*lmax).data
+    T_e_parent_grid_eq1LHS = T_e_parent.expand(lmax=grid_expansion_res).data
     
     # Field Te
-    Te_grid = T_e_parent_grid 
+    Te_grid = T_e_parent_grid_eq1LHS 
     Te_clm = pysh.SHGrid.from_array(Te_grid).expand()
     Te_clm = pysh.SHCoeffs.from_array(Te_clm.coeffs[:, :2*lmax+1, :2*lmax+1])  
     
     # Field Te^2 
-    Te2_grid = T_e_parent_grid**2 
+    Te2_grid = T_e_parent_grid_eq1LHS**2 
     Te2_clm = pysh.SHGrid.from_array(Te2_grid).expand()
     Te2_clm = pysh.SHCoeffs.from_array(Te2_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
     
     # Field max(Te-Tc,0)
-    TeTc_grid = T_e_parent_grid - T_c
+    TeTc_grid = T_e_parent_grid_eq1LHS - T_c
     # If a value is below 0, set to 0 to apply the 'max' call
     TeTc_grid = np.array(TeTc_grid.data)
     TeTc_grid[TeTc_grid < 0.0] = 0  
@@ -1055,14 +1051,14 @@ def Omega_eq1_LHS(T_e_parent, lmax, R, T_e_0, Re, g0, mass):
     # mantle branch only -- every gTe-carrying term also carries max(Te-Tc,0),
     # which is zero exactly where the density branch would switch. Monopole at
     # constant Te => benchmark preserved.
-    RTeR_grid = (R - T_e_parent_grid) / R
+    RTeR_grid = (R - T_e_parent_grid_eq1LHS) / R
     # Create a dynamic rho grid based on the local thickness threshold
-    rho_grid = np.where(T_e_parent_grid <= T_c, rho_c, rho_m)
+    rho_grid = np.where(T_e_parent_grid_eq1LHS <= T_c, rho_c, rho_m)
     # Calculate the final gTe_grid using the dynamic rho_grid
     gTe_grid = g0 * (1.0 + (RTeR_grid**3 - 1.0) * rho_grid / rhobar) / RTeR_grid**2    
     
     # Field Tc if Tc < Te else 0
-    Tcind_grid_1 = np.where(T_e_parent_grid > T_c, T_c, 0.0)
+    Tcind_grid_1 = np.where(T_e_parent_grid_eq1LHS > T_c, T_c, 0.0)
     Tcind_clm_1  = pysh.SHGrid.from_array(Tcind_grid_1).expand()
     Tcind_clm_1  = pysh.SHCoeffs.from_array(Tcind_clm_1.coeffs[:, :2*lmax+1, :2*lmax+1])
 
@@ -1145,7 +1141,7 @@ def Omega_eq1_LHS(T_e_parent, lmax, R, T_e_0, Re, g0, mass):
     B_2 = _dl['B_2']
     Cp    = _dl['Cp']
     # Te-dependent layer fields (kept local: they need T_e_parent_grid)
-    TeMt_grid  = T_e_parent_grid - Mt
+    TeMt_grid  = T_e_parent_grid_eq1LHS - Mt
     TeMt0      = np.array(TeMt_grid.data)
     TeMt0[TeMt0 < 0.0] = 0.0                       # max(Te - Mt, 0)
     MTeMt      = np.array(TeMt_grid.data)
@@ -1285,13 +1281,13 @@ def Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm, lmax, R, T_e_0, Re, g0
     rhobar2l1 = np.array([ 3/ (rhobar*(2*l+1)) for l in range(2 * lmax + 1)])
 
     # SH-MULTIPLIED FIELDS        
-    T_e_parent_grid = T_e_parent.expand(lmax=3*lmax).data
-    topo_grid = topo_clm.expand(lmax=3*lmax).data - R
-    geoid_grid = geoid_clm.expand(lmax=3*lmax).data - R
-    alpha_grid = a_clm.expand(lmax=3*lmax).data
+    T_e_parent_grid_eq2RHS = T_e_parent.expand(lmax=grid_expansion_res).data
+    topo_grid_eq2RHS = topo_clm.expand(lmax=grid_expansion_res).data - R
+    geoid_grid_eq2RHS = geoid_clm.expand(lmax=grid_expansion_res).data - R
+    alpha_grid_eq2RHS = a_clm.expand(lmax=grid_expansion_res).data
     
     # Te - Tc field
-    TeTc_grid = T_e_parent_grid - T_c
+    TeTc_grid = T_e_parent_grid_eq2RHS - T_c
     # If a value is below 0, set to 0 to apply the 'max' call
     TeTc_grid_data = np.array(TeTc_grid.data)
     TeTc_grid_data[TeTc_grid_data < 0.0] = 0  
@@ -1299,7 +1295,7 @@ def Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm, lmax, R, T_e_0, Re, g0
     
     
     # Field RHS 2a: lap2 * Te*H*alpha grid
-    TeHa_grid = T_e_parent_grid * topo_grid * alpha_grid
+    TeHa_grid = T_e_parent_grid_eq2RHS * topo_grid_eq2RHS * alpha_grid_eq2RHS
     TeHa_clm = pysh.SHGrid.from_array(TeHa_grid).expand()
     TeHa_clm = pysh.SHCoeffs.from_array(TeHa_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
     # Perform multiplication with laplacian2, by multiplying it with 
@@ -1310,21 +1306,21 @@ def Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm, lmax, R, T_e_0, Re, g0
 
 
     # (same H', G'; here each product also carries alpha and the Laplacian is +2)
-    Hp = pysh.SHGrid.from_array(topo_grid).expand()
+    Hp = pysh.SHGrid.from_array(topo_grid_eq2RHS).expand()
     Hp = pysh.SHCoeffs.from_array(Hp.coeffs[:, :2*lmax+1, :2*lmax+1])
     for l in range(Hp.coeffs.shape[1]): 
         Hp.coeffs[:, l, :] *= 1.0/RTcR_l2[l]
-    Hp_grid = Hp.expand(lmax=3*lmax).data
+    Hp_grid = Hp.expand(lmax=grid_expansion_res).data
     
-    Gp = pysh.SHGrid.from_array(geoid_grid).expand()
+    Gp = pysh.SHGrid.from_array(geoid_grid_eq2RHS).expand()
     Gp = pysh.SHCoeffs.from_array(Gp.coeffs[:, :2*lmax+1, :2*lmax+1])
     for l in range(Gp.coeffs.shape[1]): 
         Gp.coeffs[:, l, :] *= 1/( rhobar2l1[l] * RTcR_l2[l] )
-    Gp_grid = Gp.expand(lmax=3*lmax).data
+    Gp_grid = Gp.expand(lmax=grid_expansion_res).data
      
-    d_dc1 = pysh.SHGrid.from_array(TeTc_grid * Hp_grid * alpha_grid).expand()   # max*H'*alpha
+    d_dc1 = pysh.SHGrid.from_array(TeTc_grid * Hp_grid * alpha_grid_eq2RHS).expand()   # max*H'*alpha
     d_dc1 = pysh.SHCoeffs.from_array(d_dc1.coeffs[:, :2*lmax+1, :2*lmax+1])
-    d_dc2 = pysh.SHGrid.from_array(TeTc_grid * Gp_grid * alpha_grid).expand()   # max*G'*alpha
+    d_dc2 = pysh.SHGrid.from_array(TeTc_grid * Gp_grid * alpha_grid_eq2RHS).expand()   # max*G'*alpha
     d_dc2 = pysh.SHCoeffs.from_array(d_dc2.coeffs[:, :2*lmax+1, :2*lmax+1])
     for l in range(d_dc1.coeffs.shape[1]):       # Laplacian+2 on the inner product (as in 2a)
         d_dc1.coeffs[:, l, :] *= lap2_by_degree[l]
@@ -1341,7 +1337,7 @@ def Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm, lmax, R, T_e_0, Re, g0
     Cp    = _dl['Cp']  
     RTcR_l2 = np.array([((R-T_c)/R)**(l+2) for l in range(2*lmax+1)])
     # Te-dependent layer fields (kept local: they need T_e_parent_grid)
-    TeMt_grid  = T_e_parent_grid - Mt
+    TeMt_grid  = T_e_parent_grid_eq2RHS - Mt
     TeMt0      = np.array(TeMt_grid.data)
     TeMt0[TeMt0 < 0.0] = 0.0                       # max(Te - Mt, 0)
     MTeMt      = np.array(TeMt_grid.data)
@@ -1372,10 +1368,10 @@ def Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm, lmax, R, T_e_0, Re, g0
         c = pysh.SHCoeffs.from_array(np.array(src_clm.coeffs[:, :2*lmax+1, :2*lmax+1]))
         for l in range(c.coeffs.shape[1]):
             c.coeffs[:, l, :] *= wts[l]
-        return c.expand(lmax=3*lmax).data
+        return c.expand(lmax=grid_expansion_res).data
 
     def _eq2_field(prod_grid):
-        c = pysh.SHGrid.from_array(alpha_grid * prod_grid).expand()
+        c = pysh.SHGrid.from_array(alpha_grid_eq2RHS * prod_grid).expand()
         c = pysh.SHCoeffs.from_array(c.coeffs[:, :2*lmax+1, :2*lmax+1])
         for l in range(c.coeffs.shape[1]):
             c.coeffs[:, l, :] *= lap2_by_degree[l]
@@ -1383,8 +1379,8 @@ def Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm, lmax, R, T_e_0, Re, g0
 
     wH_d2 = np.array([-Cp[l]  / B_1[l] for l in range(2*lmax+1)])
     wG_d2 = np.array([ 1.0 / B_1[l]           for l in range(2*lmax+1)])
-    _topo_c2  = pysh.SHGrid.from_array(topo_grid).expand()
-    _geoid_c2 = pysh.SHGrid.from_array(geoid_grid).expand()
+    _topo_c2  = pysh.SHGrid.from_array(topo_grid_eq2RHS).expand()
+    _geoid_c2 = pysh.SHGrid.from_array(geoid_grid_eq2RHS).expand()
     d_drho1 = _eq2_field(Phat_g2 * _drhom_grid2(_topo_c2,  wH_d2))
     d_drho2 = _eq2_field(Phat_g2 * _drhom_grid2(_geoid_c2, wG_d2))
 
@@ -1433,20 +1429,20 @@ def Omega_eq2_LHS(T_e_parent, a_clm, lmax, R, T_e_0, Re, g0, mass):
     g_m = g0 * (1.0 + (RTcR**3 - 1.0) * rho_c / rhobar) / RTcR**2    
 
     # SH-MULTIPLIED FIELDS        
-    T_e_parent_grid = T_e_parent.expand(lmax=3*lmax).data
-    a_grid = a_clm.expand(lmax=3*lmax).data
+    T_e_parent_grid_eq2LHS = T_e_parent.expand(lmax=grid_expansion_res).data
+    a_grid_eq2LHS = a_clm.expand(lmax=grid_expansion_res).data
     # gTe FIELD (variable-Te fix): gravity at the LOCAL shell-base depth,
     # mantle branch only -- every gTe-carrying term also carries max(Te-Tc,0),
     # which is zero exactly where the density branch would switch. Monopole at
     # constant Te => benchmark preserved.
-    RTeR_grid = (R - T_e_parent_grid) / R
+    RTeR_grid = (R - T_e_parent_grid_eq2LHS) / R
     # Create a dynamic rho grid based on the local thickness threshold
-    rho_grid = np.where(T_e_parent_grid <= T_c, rho_c, rho_m)
+    rho_grid = np.where(T_e_parent_grid_eq2LHS <= T_c, rho_c, rho_m)
     # Calculate the final gTe_grid using the dynamic rho_grid
     gTe_grid = g0 * (1.0 + (RTeR_grid**3 - 1.0) * rho_grid / rhobar) / RTeR_grid**2
     
     # Te - Tc field
-    TeTc_grid = T_e_parent_grid - T_c
+    TeTc_grid = T_e_parent_grid_eq2LHS - T_c
     # If a value is below 0, set to 0 to apply the 'max' call
     TeTc_grid_data = np.array(TeTc_grid.data)
     TeTc_grid_data[TeTc_grid_data < 0.0] = 0  
@@ -1454,19 +1450,19 @@ def Omega_eq2_LHS(T_e_parent, a_clm, lmax, R, T_e_0, Re, g0, mass):
 
 
     # Field 2a: Te * alpha
-    Tea_grid = T_e_parent_grid * a_grid
+    Tea_grid = T_e_parent_grid_eq2LHS * a_grid_eq2LHS
     Tea_clm = pysh.SHGrid.from_array(Tea_grid).expand()
     Tea_clm = pysh.SHCoeffs.from_array(Tea_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
     
     # Field 2b: alpha
     a_clm_copy = a_clm.copy()
     a_clm_copy.coeffs = a_clm_copy.coeffs[:, :2*lmax+1, :2*lmax+1]
-    Tcind_grid_2 = np.where(T_e_parent_grid > T_c, T_c, 0.0)
-    Tcinda_clm   = pysh.SHGrid.from_array(Tcind_grid_2 * a_grid.data).expand()
+    Tcind_grid_2 = np.where(T_e_parent_grid_eq2LHS > T_c, T_c, 0.0)
+    Tcinda_clm   = pysh.SHGrid.from_array(Tcind_grid_2 * a_grid_eq2LHS.data).expand()
     Tcinda_clm   = pysh.SHCoeffs.from_array(Tcinda_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
     
     # Field 2c: max(Te-Tc,0) * alpha
-    gTeTeTca_grid = gTe_grid * TeTc_grid * a_grid  # gTe grid folded into here for variable Te
+    gTeTeTca_grid = gTe_grid * TeTc_grid * a_grid_eq2LHS  # gTe grid folded into here for variable Te
     gTeTeTca_clm  = pysh.SHGrid.from_array(gTeTeTca_grid).expand()
     gTeTeTca_clm  = pysh.SHCoeffs.from_array(gTeTeTca_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
 
@@ -1478,21 +1474,21 @@ def Omega_eq2_LHS(T_e_parent, a_clm, lmax, R, T_e_0, Re, g0, mass):
     g_M = _dl['g_M']
     
     # Te - Mt field
-    TeMt_grid  = T_e_parent_grid - Mt
+    TeMt_grid  = T_e_parent_grid_eq2LHS - Mt
     TeMt0      = np.array(TeMt_grid.data)
     TeMt0[TeMt0 < 0.0] = 0.0                       # max(Te - Mt, 0)
     MTeMt      = np.array(TeMt_grid.data)
     MTeMt[MTeMt > M] = M                           # min(Te - Mt, M)
 
     # 2d's field is max*alpha (NOT gTe*max*alpha -- gTe belongs to 2c only)
-    TeTca_grid = pysh.SHGrid.from_array(TeTc_grid * a_grid).expand()
+    TeTca_grid = pysh.SHGrid.from_array(TeTc_grid * a_grid_eq2LHS).expand()
     TeTca_clm = pysh.SHCoeffs.from_array(TeTca_grid.coeffs[:, :2*lmax+1, :2*lmax+1])
 
     # drho branch: omega's drhom term  P_hat*drhom/R  contributes the
     # w-coupling  P_hat * Dw  (Dw per-degree, P_hat a field) -> supplied to
     # solve_beuthe as a separate (field, diagonal) pair, since the operand
     # weight cannot be folded into a single convolution field.
-    Phata_clm = pysh.SHGrid.from_array( MTeMt * TeMt0 * a_grid ).expand()
+    Phata_clm = pysh.SHGrid.from_array( MTeMt * TeMt0 * a_grid_eq2LHS ).expand()
     Phata_clm = pysh.SHCoeffs.from_array(Phata_clm.coeffs[:, :2*lmax+1, :2*lmax+1])
 
 
@@ -1675,7 +1671,23 @@ def q_lm(topo_clm, geoid_clm, lmax, R, T_e_0, Re, g0, mass):
                    * field_geoid_drho5[:, :lmax+1, :lmax+1] if solve_for == 'drho_lm' else 0)
                 ) 
 
+    # ---- degree 1: DSP enforces the COM constraint Gc_1 = 0 (thinshell.py eq(2),
+    # "Force the degree-1 geoid to zero"), so the Gc-elimination terms must be
+    # dropped here. Harmless to the solve (solve_beuthe zeroes the l=0,1 rows of rhs),
+    # but does affect compute_omega and the stress-strain calculations
+    H1 = topo_clm_copyq.coeffs[:, 1, :2]
+    G1 = geoid_clm_copyq.coeffs[:, 1, :2]
 
+    if solve_for == 'dc_lm':
+        dc1      = (rho_l * H1 - rhobar * G1) / (drho * RTcR**3)   # eq(1), w_1 = 0
+        q_phys_1 = g0 * rho_l * (H1 - G1) - g_m * drho * dc1        # eq(3), Gc_1 = w_1 = 0
+        q_coeffs[:, 1, :2] = -Re**4 * Kalousova_scaler1 * q_phys_1
+        
+    if solve_for == 'drho_lm':
+        q_phys_1 =  (g0*rho_l*(H1-G1)   + q_topo_drho3 * field_topo_drho3[:, 1, :2]
+                        + q_geoid_drho4 * field_geoid_drho4[:, 1, :2])        
+        q_coeffs[:, 1, :2] = -Re**4 * Kalousova_scaler1 * q_phys_1
+        
     q_lm_unstr = pysh.shio.SHCilmToVector(q_coeffs)
         
     return q_lm_unstr
@@ -1746,7 +1758,7 @@ def build_A_tilde_group2(Te_unstr, Te2_unstr, max_unstr,
 
 # %% FINAL OMEGA, dc, drho AND Gc EQUATIONS (COMPUTED AFTER w_lm IS KNOWN)
 
-def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax):
+def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, q_clm, g0, R, T_e_0, lmax_calc, lmax_grid):
     """
     Equation for tangential loading potential Omega, following the definition
     as given in Broquet & Andrews-Hanna (2022), which is derived from Banerdt
@@ -1758,17 +1770,18 @@ def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax):
     Omega itself can therefore be obtained using the result for w_lm.
     """
     
+    R_e = R - T_e_0/2
     rhobar = mass * 3.0 / 4.0 / np.pi / R**3
     RTcR = (R-T_c)/R
     g_m = g0 * (1.0 + (RTcR**3 - 1.0) * rho_c / rhobar) / RTcR**2    
     
     # Grids
-    w_grid = w_clm.expand(lmax=lmax).data
-    T_e_parent_grid = T_e_parent.expand(lmax=lmax).data
-    topo_grid = topo_clm.expand(lmax=lmax).data - R
-    geoid_grid = geoid_clm.expand(lmax=lmax).data - R
+    w_grid_copyOmega = w_clm.expand(lmax=lmax_grid, lmax_calc=lmax_calc).data
+    T_e_parent_grid_copyOmega = T_e_parent.copy().expand(lmax=lmax_grid, lmax_calc=lmax_calc).data
+    topo_grid_copyOmega = topo_clm.copy().expand(lmax=lmax_grid, lmax_calc=lmax_calc).data - R
+    geoid_grid_copyOmega = geoid_clm.copy().expand(lmax=lmax_grid, lmax_calc=lmax_calc).data - R
     # Te - Tc field
-    TeTc_grid = T_e_parent_grid - T_c
+    TeTc_grid = T_e_parent_grid_copyOmega - T_c
     # If a value is below 0, set to 0 to apply the 'max' call
     TeTc_grid_data = np.array(TeTc_grid.data)
     TeTc_grid_data[TeTc_grid_data < 0.0] = 0  
@@ -1776,14 +1789,14 @@ def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax):
  
  
     # gravity at the elastic base (depth Te) for the mantle column term
-    RTeR_grid = (R - T_e_parent_grid) / R
+    RTeR_grid = (R - T_e_parent_grid_copyOmega) / R
     # Create a dynamic rho grid based on the local thickness threshold
-    rho_grid = np.where(T_e_parent_grid <= T_c, rho_c, rho_m)
+    rho_grid = np.where(T_e_parent_grid_copyOmega <= T_c, rho_c, rho_m)
     
     # Calculate the final gTe_grid using the dynamic rho_grid
     gTe_grid = g0 * (1.0 + (RTeR_grid**3 - 1.0) * rho_grid / rhobar) / RTeR_grid**2    
     
-    TeH_grid = T_e_parent_grid * topo_grid
+    TeH_grid = T_e_parent_grid_copyOmega * topo_grid_copyOmega
  
     # FIX (operator ordering): apply the per-degree dc-elimination weights to
     # H and G FIRST, then multiply by the max(Te-Tc,0) grid -- this is the 
@@ -1791,38 +1804,41 @@ def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax):
     # Omega_eq1_RHS in the solver (weight-then-multiply).
     # Previously the weights were applied to the coefficients of the PRODUCT
     # (TeTc*H), which differs for laterally varying Te.
-    Hp_coeffs = pysh.SHGrid.from_array(topo_grid).expand()
+    Hp_coeffs = pysh.SHGrid.from_array(topo_grid_copyOmega).expand()
+    Hp_coeffs = truncate(Hp_coeffs, lmax=lmax_calc)
     for l in range(Hp_coeffs.coeffs.shape[1]):
         Hp_coeffs.coeffs[:, l, :] *= 1/RTcR**(l+2)
-    Hp_grid = Hp_coeffs.expand(lmax=lmax).data
+    Hp_grid = Hp_coeffs.expand(lmax=lmax_grid, lmax_calc=lmax_calc).data
     TeTcHp_grid = TeTc_grid * Hp_grid
  
-    Gp_coeffs = pysh.SHGrid.from_array(geoid_grid).expand()
+    Gp_coeffs = pysh.SHGrid.from_array(geoid_grid_copyOmega).expand()
+    Gp_coeffs = truncate(Gp_coeffs, lmax=lmax_calc)
     for l in range(Gp_coeffs.coeffs.shape[1]):
         Gp_coeffs.coeffs[:, l, :] *= rhobar*(2*l+1)/(3 * RTcR**(l+2))
-    Gp_grid = Gp_coeffs.expand(lmax=lmax).data
+    Gp_grid = Gp_coeffs.expand(lmax=lmax_grid, lmax_calc=lmax_calc).data
     TeTcGp_grid = TeTc_grid * Gp_grid
     
     
-    Tcind_grid_o = np.where(T_e_parent_grid > T_c, T_c, 0.0)   # Te<Tc FIX
+    Tcind_grid_o = np.where(T_e_parent_grid_copyOmega > T_c, T_c, 0.0)   # Te<Tc FIX
  
     # Compute Re*Omega_lm as the term Omega_lm (required in conversion between
     # Banerdt and Beuthe's formulations).  w-coefficient corrected to match the
     # solve: surface -> drhol*g0 (vanishes for rho_l=rho_c), mantle -> gTe.
     term_1 = nu/(1-nu)*rho_l*g0*TeH_grid
     term_2 = + nu/(1-nu)*g_m*rho_l * TeTcHp_grid
-    term_3 = -drhol*g0*nu/(1-nu)*T_e_parent_grid *w_grid
+    term_3 = -drhol*g0*nu/(1-nu)*T_e_parent_grid_copyOmega *w_grid_copyOmega
     
-    term_4 = rho_c*g_m*Tcind_grid_o *w_grid
-    term_5 = rho_m*gTe_grid*TeTc_grid *w_grid  # gTe field instead of scalar
+    term_4 = rho_c*g_m*Tcind_grid_o *w_grid_copyOmega
+    term_5 = rho_m*gTe_grid*TeTc_grid *w_grid_copyOmega  # gTe field instead of scalar
     
     # drhol EXTENSION (zero if rho_l == rho_c): residual w-piece of the
     # (dc-w) substitution, + v1v*g_m*drhol*max(Te-Tc,0)*P_l*w  with the
     # weight applied to w FIRST (weight-then-multiply, as in the solver).
-    wp_coeffs = pysh.SHGrid.from_array(w_grid).expand()
+    wp_coeffs = pysh.SHGrid.from_array(w_grid_copyOmega).expand()
+    wp_coeffs = truncate(wp_coeffs, lmax=lmax_calc)
     for l in range(wp_coeffs.coeffs.shape[1]):
         wp_coeffs.coeffs[:, l, :] *= 1/RTcR**(l+2)
-    wp_grid = wp_coeffs.expand(lmax=lmax).data
+    wp_grid = wp_coeffs.expand(lmax=lmax_grid, lmax_calc=lmax_calc).data
     term_6 = + nu/(1-nu)*g_m*drhol * TeTc_grid * wp_grid
     term_7 = - nu/(1-nu)*g_m * TeTcGp_grid
  
@@ -1848,14 +1864,15 @@ def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax):
         term_2 = 0.0          # dc-elimination artefacts: absent when dc = 0
         term_6 = 0.0
         term_7 = 0.0
-        term_8 = - nu/(1-nu)*drho*g_m * TeTc_grid * w_grid
-        _dl_o   = drho_layer(lmax, R, g0, mass)
-        TeMt_o  = T_e_parent_grid - Mt
+        term_8 = - nu/(1-nu)*drho*g_m * TeTc_grid * w_grid_copyOmega
+        _dl_o   = drho_layer(lmax_grid, R, g0, mass)
+        TeMt_o  = T_e_parent_grid_copyOmega - Mt
         TeMt0_o = np.where(TeMt_o > 0.0, TeMt_o, 0.0)         # max(Te-Mt, 0)
         Phat_o  = (-0.5 * nu/(1-nu) * _dl_o['g_M'] * TeMt0_o
                    * np.minimum(TeMt_o, _dl_o['M']))          # min(M, Te-Mt)
-        drho_m_grid = compute_drho(w_clm, topo_clm, geoid_clm,
-                                   R, lmax).expand(lmax=lmax).data
+        drho_m_grid = compute_drho(w_clm, topo_clm, geoid_clm, R, 
+                            lmax_calc=lmax_calc, 
+                            lmax_grid=lmax_grid).expand(lmax=lmax_grid).data
         term_9 = Phat_o * drho_m_grid
     
     
@@ -1880,10 +1897,13 @@ def compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax):
         
     Omega_grid = pysh.SHGrid.from_array(Omega_grid_data)
     Omega_clm = Omega_grid.expand()
+    Omega_clm = truncate(Omega_clm, lmax=lmax_calc)
     
+    # Correctly set the degree 1 Omega coefficients
+    Omega_clm.coeffs[:, 1, :2] = (E * T_e_0**3 / (2.0 * R_e**3)) * q_clm.coeffs[:, 1, :2]    # TODO: CHeck if this is the correct term that needs fixing to align DSP and M4
     return Omega_clm
 
-def compute_dc(w_clm, topo_clm, geoid_clm, R, lmax):
+def compute_dc(w_clm, topo_clm, geoid_clm, R, lmax_calc, lmax_grid):
     """
     Compute the crustal root variations ('bottom loads') dc_lm using the 
     rewritten equation of Gc_lm with drho_lm=0. 
@@ -1891,53 +1911,53 @@ def compute_dc(w_clm, topo_clm, geoid_clm, R, lmax):
     
     rhobar = mass * 3.0 / 4.0 / np.pi / R**3
     RTcR = (R-T_c)/R
-    L_comp = min(w_clm.lmax, topo_clm.lmax, geoid_clm.lmax, lmax)
+    L_comp = min(w_clm.lmax, topo_clm.lmax, geoid_clm.lmax, lmax_calc)
 
-    topo_clm_copy = topo_clm.copy()
-    topo_clm_copy.coeffs[0,0,0] = 0
-    topo_clm_copy = truncate(topo_clm_copy, L_comp)
+    topo_clm_copydc = topo_clm.copy()
+    topo_clm_copydc.coeffs[0,0,0] = 0
+    topo_clm_copydc = truncate(topo_clm_copydc, L_comp)
 
-    geoid_clm_copy = geoid_clm.copy()
-    geoid_clm_copy.coeffs[0,0,0] = 0
-    geoid_clm_copy = truncate(geoid_clm_copy, L_comp)
+    geoid_clm_copydc = geoid_clm.copy()
+    geoid_clm_copydc.coeffs[0,0,0] = 0
+    geoid_clm_copydc = truncate(geoid_clm_copydc, L_comp)
 
-    w_clm_copy = w_clm.copy()
-    w_clm_copy.coeffs[0,0,0] = 0
-    w_clm_copy = truncate(w_clm_copy, L_comp)
+    w_clm_copydc = w_clm.copy()
+    w_clm_copydc.coeffs[0,0,0] = 0
+    w_clm_copydc = truncate(w_clm_copydc, L_comp)
     
-    for l in range(geoid_clm_copy.coeffs.shape[1]):
-       geoid_clm_copy.coeffs[:, l, :] *= rhobar*(2*l+1)/3
+    for l in range(geoid_clm_copydc.coeffs.shape[1]):
+       geoid_clm_copydc.coeffs[:, l, :] *= rhobar*(2*l+1)/3
     
-    dc_clm = 1/drho * (rho_l*topo_clm_copy + drhol*w_clm_copy - geoid_clm_copy)
+    dc_clm = 1/drho * (rho_l*topo_clm_copydc + drhol*w_clm_copydc - geoid_clm_copydc)
         
     for l in range(dc_clm.coeffs.shape[1]):
        dc_clm.coeffs[:, l, :] *= 1/(RTcR**(l+2)) 
         
-    dc_clm = dc_clm + w_clm_copy
+    dc_clm = dc_clm + w_clm_copydc
     
     return dc_clm
 
 
-def compute_drho(w_clm, topo_clm, geoid_clm, R, lmax):
+def compute_drho(w_clm, topo_clm, geoid_clm, R, lmax_calc, lmax_grid):
     """
     Compute the mantle density variations ('bottom loads') drho_lm using the 
     rewritten equation of Gc_lm with dc_lm=0. 
     """
     
     rhobar = mass * 3.0 / 4.0 / np.pi / R**3
-    L_comp = min(w_clm.lmax, topo_clm.lmax, geoid_clm.lmax, lmax)
+    L_comp = min(w_clm.lmax, topo_clm.lmax, geoid_clm.lmax, lmax_calc)
 
-    topo_clm_copy = topo_clm.copy()
-    topo_clm_copy.coeffs[0,0,0] = 0
-    topo_clm_copy = truncate(topo_clm_copy, L_comp)
+    topo_clm_copydrho = topo_clm.copy()
+    topo_clm_copydrho.coeffs[0,0,0] = 0
+    topo_clm_copydrho = truncate(topo_clm_copydrho, L_comp)
 
-    geoid_clm_copy = geoid_clm.copy()
-    geoid_clm_copy.coeffs[0,0,0] = 0
-    geoid_clm_copy = truncate(geoid_clm_copy, L_comp)
+    geoid_clm_copydrho = geoid_clm.copy()
+    geoid_clm_copydrho.coeffs[0,0,0] = 0
+    geoid_clm_copydrho = truncate(geoid_clm_copydrho, L_comp)
 
-    w_clm_copy = w_clm.copy()
-    w_clm_copy.coeffs[0,0,0] = 0
-    w_clm_copy = truncate(w_clm_copy, L_comp)
+    w_clm_copydrho = w_clm.copy()
+    w_clm_copydrho.coeffs[0,0,0] = 0
+    w_clm_copydrho = truncate(w_clm_copydrho, L_comp)
  
     # ------- drho_lm VARIABLES AND FIELDS -------
     RMt = R - Mt
@@ -1945,11 +1965,11 @@ def compute_drho(w_clm, topo_clm, geoid_clm, R, lmax):
     RMtR = RMt / R
     RMbR = RMb / R
     
-    RMtR_l3   = np.array([RMtR**(l+3) for l in range(2 * lmax + 1)])
-    RMbR_l3   = np.array([RMbR**(l+3) for l in range(2 * lmax + 1)])
-    Rl3       = np.array([R/(l+3) for l in range(2 * lmax + 1)])
-    Cp        = np.array([3/(rhobar*(2*l+1)) for l in range(2 * lmax + 1)])
-    RTcR_l2 = np.array([((R-T_c)/R)**(l+2) for l in range(2 * lmax + 1)])
+    RMtR_l3   = np.array([RMtR**(l+3) for l in range(2 * lmax_grid + 1)])
+    RMbR_l3   = np.array([RMbR**(l+3) for l in range(2 * lmax_grid + 1)])
+    Rl3       = np.array([R/(l+3) for l in range(2 * lmax_grid + 1)])
+    Cp        = np.array([3/(rhobar*(2*l+1)) for l in range(2 * lmax_grid + 1)])
+    RTcR_l2 = np.array([((R-T_c)/R)**(l+2) for l in range(2 * lmax_grid + 1)])
     
     B_1 = Cp * Rl3 * ( RMtR_l3 - RMbR_l3 )
  
@@ -1966,10 +1986,10 @@ def compute_drho(w_clm, topo_clm, geoid_clm, R, lmax):
     #       but required for distinct load densities);
     #   (4) the G term was already correct (+G/B_1) -- which is why the map
     #       came out only ROUGHLY inverted rather than exactly.
-    topo_term  = topo_clm_copy * (-rho_l)
-    w_term_1   = w_clm_copy * (-drho)          # moho term, weight phi^(l+2)
-    w_term_2   = w_clm_copy * (-drhol)         # load-density term, no weight
-    geoid_term = geoid_clm_copy.copy()
+    topo_term  = topo_clm_copydrho * (-rho_l)
+    w_term_1   = w_clm_copydrho * (-drho)          # moho term, weight phi^(l+2)
+    w_term_2   = w_clm_copydrho * (-drhol)         # load-density term, no weight
+    geoid_term = geoid_clm_copydrho.copy()
     for l in range(topo_term.coeffs.shape[1]):
         topo_term.coeffs[:, l, :]  *= Cp[l] / B_1[l]
         w_term_1.coeffs[:, l, :]   *= Cp[l] * RTcR_l2[l] / B_1[l]
@@ -2000,12 +2020,15 @@ def compute_Gc(w_clm, dc_clm, topo_clm, g0, R, T_e_0, lmax):
     g_m = g0 * (1.0 + (RTcR**3 - 1.0) * rho_c / rhobar) / RTcR**2
 
     # FIX (degree-0 bookkeeping): strip the reference-radius monopole locally.
-    topo_clm_copy = topo_clm.copy()
-    topo_clm_copy.coeffs[0,0,0] = 0
+    topo_clm_copyGc = topo_clm.copy()
+    topo_clm_copyGc.coeffs[0,0,0] = 0
 
-    wmdc = w_clm - dc_clm                        # (w - dc)
+    w_clm_copyGc = w_clm.copy()
+    dc_clm_copyGc = dc_clm.copy()
 
-    H_term = (rho_l*topo_clm_copy + drhol*w_clm) # (rho_l*H + drhol*w) * phi^l
+    wmdc = w_clm_copyGc - dc_clm_copyGc                        # (w - dc)
+
+    H_term = (rho_l*topo_clm_copyGc + drhol*w_clm_copyGc) # (rho_l*H + drhol*w) * phi^l
     for l in range(H_term.coeffs.shape[1]):
         H_term.coeffs[:, l, :] *= RTcR**l
 
@@ -2020,47 +2043,413 @@ def compute_Gc(w_clm, dc_clm, topo_clm, g0, R, T_e_0, lmax):
     return Gc_grid, Gc_clm
 
 
-# %% STRESS AND STRAIN FIELDS
+# %% STRESS AND STRAIN FIELDS - OLD, MISALIGNED WITH DSP
+
+
+# def O1(SH_function, lmax):
+#     """ Beuthe (2008)'s differential operator O_1 in 2D spherical geometry. """
+#     SH_function_grid = SH_function.expand(lmax=lmax)
+#     dtheta_grid = SH_function.gradient(lmax=lmax).theta
+#     dtheta_sh = dtheta_grid.expand()
+#     dtheta2_grid = dtheta_sh.gradient(lmax=lmax).theta
+#     return dtheta2_grid.data + SH_function_grid.data
+
+# def O2(SH_function, lmax):
+#     """ Beuthe (2008)'s differential operator O_2 in 2D spherical geometry. """
+#     theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1)+1, endpoint=True))
+
+#     cot_theta = np.divide( 1.0, np.tan(theta_range), 
+#                           out=np.zeros_like(np.tan(theta_range)), 
+#                           where=np.tan(theta_range) != 0)
+#     cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+
+#     sin_theta = np.sin(theta_range)
+#     sin_theta_grid = np.tile(sin_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+
+#     csc_theta = np.divide( 1.0, np.sin(theta_range), 
+#                           out=np.zeros_like(np.sin(theta_range)), 
+#                           where=np.sin(theta_range) != 0)
+#     csc_theta_grid = np.tile(csc_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+
+#     SH_function_grid = SH_function.expand(lmax=lmax)
+#     dtheta_grid = SH_function.gradient(lmax=lmax).theta
+
+#     dphi_grid = SH_function.gradient(lmax=lmax).phi
+#     dphi_grid.data *= sin_theta_grid
+#     dphi_sh = dphi_grid.expand(lmax_calc=LMAX_REF)
+#     dphi2_grid = dphi_sh.gradient(lmax=lmax).phi
+#     dphi2_grid.data *= csc_theta_grid
+
+#     return dphi2_grid.data + cot_theta_grid * dtheta_grid.data + SH_function_grid.data
+
+# def O3(SH_function, lmax):
+#     """ Beuthe (2008)'s differential operator O_3 in 2D spherical geometry. """
+#     theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1)+1, endpoint=True))
+
+#     cot_theta = np.divide( 1.0, np.tan(theta_range), 
+#                           out=np.zeros_like(np.tan(theta_range)), 
+#                           where=np.tan(theta_range) != 0)
+#     cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+
+#     sin_theta = np.sin(theta_range)
+#     sin_theta_grid = np.tile(sin_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+
+#     csc_theta = np.divide( 1.0, np.sin(theta_range), 
+#                           out=np.zeros_like(np.sin(theta_range)), 
+#                           where=np.sin(theta_range) != 0)
+#     csc_theta_grid = np.tile(csc_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+
+#     dphi_grid = SH_function.gradient(lmax=lmax).phi
+#     dphi_grid.data *= sin_theta_grid
+
+#     dphi_sh = dphi_grid.expand(lmax_calc=LMAX_REF)
+#     dthetaphi_grid = dphi_sh.gradient(lmax=lmax).theta
+
+#     return (csc_theta_grid * dthetaphi_grid.data 
+#             - cot_theta_grid * csc_theta_grid * dphi_grid.data)
+
+
+
+# def stress_fields(S_sol, w_sol, T_e_parent, lmax, R, T_e_0, depth=0.0):
+#     """
+#     Stresses in the DSP/Banerdt convention (Banerdt 1986 eqs A12-A14, as in
+#     DSP's compute_strains): plane-stress Hooke's law applied to membrane +
+#     bending strains built from the tangential potential S (== DSP's A_lm)
+#     and w, with 1/R kernels and the thin-shell top-fiber factor
+#     eps_f = (Te/2 - depth)/(1 + (Te/2 - depth)/R).
+#     Returns stresses in MPa (matching DSP).
+
+#     NOTE: this replaces the previous Beuthe eq-(73) stress-function form
+#     (kept below as stress_fields_beuthe73), which evaluates the top-fiber
+#     stress with exact z/(Re+z) curvature factors and 1/Re kernels. The two
+#     differ by O(Te/R) factors (~4-7% for Te=268 km) -- for benchmarking
+#     against DSP the convention must match DSP.
+#     """
+#     O1S = O1(S_sol, lmax); O2S = O2(S_sol, lmax); O3S = O3(S_sol, lmax)
+#     O1w = O1(w_sol, lmax); O2w = O2(w_sol, lmax); O3w = O3(w_sol, lmax)
+#     S_grid  = S_sol.expand(lmax=lmax)
+#     w_grid  = w_sol.expand(lmax=lmax)
+#     Te_grid = T_e_parent.expand(lmax=lmax)
+
+#     # membrane strains (Banerdt A16-A18 with S in place of A)
+#     eps_t    = 1/R * (O1S - S_grid.data + w_grid.data)
+#     eps_p    = 1/R * (O2S - S_grid.data + w_grid.data)
+#     omega_sh = 1/R * (2*O3S)                       # engineering shear
+#     # bending strains (A19-A21); note O1w = d2w/dth2 + w, so
+#     # kappa_t = -(d2w/dth2)/R^2 - w/R^2 = -O1w/R^2 (and analogously kappa_p)
+#     kappa_t = -1/R**2 * O1w
+#     kappa_p = -1/R**2 * O2w
+#     tau     = -2/R**2 * O3w
+
+#     zeta  = Te_grid.data/2.0 - depth
+#     eps_f = zeta / (1.0 + zeta/R)
+#     DpsiTeR = E/(1.0 - nu**2)
+
+#     sigma_tt = (eps_t + nu*eps_p + eps_f*(kappa_t + nu*kappa_p)) * DpsiTeR / 1e6
+#     sigma_pp = (eps_p + nu*eps_t + eps_f*(kappa_p + nu*kappa_t)) * DpsiTeR / 1e6
+#     sigma_tp = (omega_sh + eps_f*tau) * 0.5 * DpsiTeR * (1.0 - nu) / 1e6
+
+#     return (pysh.SHGrid.from_array(sigma_tt),
+#             pysh.SHGrid.from_array(sigma_pp),
+#             pysh.SHGrid.from_array(sigma_tp))
+
+
+# def stress_fields_beuthe73(w_sol, F_sol, Omega_grid, T_e_parent, R, T_e_0, lmax):
+#     """
+#     Beuthe eqs (73). *** DO NOT USE FOR PRODUCTION YET -- SEE BELOW. ***
+ 
+#     Expects Omega_grid = Beuthe's Omega = Re*omega (the output of the
+#     corrected compute_Omega).
+ 
+#     STATUS (measured, not assumed). Compared against stress_fields() -- the
+#     Banerdt/DSP Hooke form -- on the same (w, F, S, Omega) at three Te:
+ 
+#         Te/R      rms ratio sigma_tt   rms ratio sigma_pp
+#         0.0791          1.149                1.513
+#         0.0181          1.195                1.234
+#         0.0059          0.737                0.842
+ 
+#     Both are FIRST-ORDER thin-shell forms of the SAME theory, so any genuine
+#     convention difference is O(Te/R) and MUST vanish as Te/R -> 0. These
+#     ratios do not converge to 1 -- they get worse. That is the signature of an
+#     ERROR, not a convention offset. (An earlier note in this file claimed a
+#     "4-7% convention difference"; that claim was wrong and is retracted.)
+ 
+#     What was checked and is FINE:
+#       * the bending structure. Banerdt uses (O1w + nu*O2w); this uses
+#         (Delta'w - (1-nu)*O2w). Since O1w + O2w = Delta'w these are identical.
+#       * the bending prefactor, to O(Te/R): Banerdt has
+#         -E*zeta/((1-nu^2)*R*(R+zeta)); the -zeta/(Re+zeta) piece here matches
+#         it with R -> Re. The extra +beta/Re piece is ~1.4% of it.
+ 
+#     Known suspects, in order:
+#       1. xi is built here as 12*R^2/Te^2 but as 12*Re^2/Te^2 everywhere else
+#         (cons_disp_S, the solver, the eta fields). Inconsistent -- but only a
+#         ~5% effect, so it cannot be the whole story.
+#       2. the membrane term  eta/Te * (O2F + Omega): the eta prefactor and the
+#         absence of any 1/Re^2-type kernel on O2F need checking against the
+#         paper. This is where the residual 20-50% must live.
+ 
+#     Re-deriving Beuthe eq (73) requires the paper and is a paper-level task
+#     (standing division of labour). Until that is done, stress_fields() -- the
+#     Banerdt/DSP form -- is the one to use: it is a direct Hooke evaluation
+#     from S and w, both of which are now validated to ~1e-12 against the
+#     reference (see the impulse test and compute_Omega's check).
+#     """
+#     # Laplacian array for degrees
+#     lap2_by_degree = np.array([(-l * (l + 1) + 2) for l in range(2 * lmax + 1)])
+#     w_lap2 = w_sol.copy()
+#     for l in range(w_lap2.coeffs.shape[1]):
+#         w_lap2.coeffs[:, l, :] *= lap2_by_degree[l]
+#     w_lap2_grid = w_lap2.expand(lmax=lmax)
+    
+#     Te_grid = T_e_parent.expand(lmax=lmax)
+    
+#     O1F = O1(F_sol, lmax); O2F = O2(F_sol, lmax); O3F = O3(F_sol, lmax)
+#     O1w = O1(w_sol, lmax); O2w = O2(w_sol, lmax); O3w = O3(w_sol, lmax) 
+    
+#     xi = 12*R**2/Te_grid.data**2
+#     eta = xi/(1+xi)
+#     zeta = Te_grid.data/2
+#     Re = R - T_e_0/2
+    
+#     sigma_tt = (eta/Te_grid.data * (O2F + Omega_grid.data) 
+#                 + E/(Re*(1-nu**2))*(eta/xi - zeta/(Re+zeta)) * (w_lap2_grid.data - (1-nu)*O2w)
+#                 )
+#     sigma_pp = (eta/Te_grid.data * (O1F + Omega_grid.data) 
+#                 + E/(Re*(1-nu**2))*(eta/xi - zeta/(Re+zeta)) * (w_lap2_grid.data - (1-nu)*O1w)
+#                 )
+#     sigma_tp = (eta/Te_grid.data * -O3F 
+#                 + E/(Re*(1+nu))*(eta/xi - zeta/(Re+zeta)) *O3w
+#                 )
+    
+#     sigma_tt = pysh.SHGrid.from_array(sigma_tt)
+#     sigma_pp = pysh.SHGrid.from_array(sigma_pp)
+#     sigma_tp = pysh.SHGrid.from_array(sigma_tp)
+    
+#     return sigma_tt, sigma_pp, sigma_tp
+
+
+# def strain_fields(S_sol, w_sol, T_e_parent, lmax, R, T_e_0, depth=0.0):
+#     """
+#     Total strains in the DSP/Banerdt convention (membrane + top-fiber
+#     bending), matching DSP's tot_theta / tot_phi / tot_thetaphi:
+#         tot = eps + eps_f*kappa,  eps_f = (Te/2-depth)/(1+(Te/2-depth)/R)
+    
+#     MISSING THE TOROIDAL DISPLACEMENT POTENTIAL T TERMS!
+#     """
+#     # Return diff operator applied S and w terms, in grid.data format
+#     O1S = O1(S_sol, lmax); O2S = O2(S_sol, lmax); O3S = O3(S_sol, lmax)
+#     O1w = O1(w_sol, lmax); O2w = O2(w_sol, lmax); O3w = O3(w_sol, lmax)
+    
+#     S_grid  = S_sol.expand(lmax=lmax)
+#     w_grid  = w_sol.expand(lmax=lmax)
+#     Te_grid = T_e_parent.expand(lmax=lmax)
+
+#     eps_t    = 1/R * (O1S - S_grid.data + w_grid.data)    
+#     eps_p    = 1/R * (O2S - S_grid.data + w_grid.data)
+#     gamma_tp = 1/R * (2*O3S)
+    
+#     kappa_t = -1/R**2 * O1w
+#     kappa_p = -1/R**2 * O2w
+#     tau     = -2/R**2 * O3w
+    
+#     zeta = Te_grid.data/2.0 - depth
+#     tot_strain_pref = zeta / (1.0 + zeta/R)
+    
+#     tot_eps_tt = eps_t    + tot_strain_pref*kappa_t
+#     tot_eps_pp = eps_p    + tot_strain_pref*kappa_p
+#     tot_eps_tp = (gamma_tp + tot_strain_pref*tau)/2.0
+    
+#     tot_eps_tt = pysh.SHGrid.from_array(tot_eps_tt)
+#     tot_eps_pp = pysh.SHGrid.from_array(tot_eps_pp)
+#     tot_eps_tp = pysh.SHGrid.from_array(tot_eps_tp)
+    
+#     return tot_eps_tt, tot_eps_pp, tot_eps_tp
+
+
+# def cons_disp_S(w_sol, F_sol, Omega_grid, T_e_parent, a_clm, R, T_e_0, lmax_calc, lmax_grid):
+#     """ 
+#     Beuthe (2008)'s consoidal/poloidal tangential displacement potential S_lm 
+#     (A_lm in DSP/Banerdt (1986)). Used in computations of strain.
+#     """
+    
+#     lap_by_degree = np.array([(-l * (l + 1)) for l in range(2 * lmax_grid + 1)])
+#     lap2_by_degree = np.array([(-l * (l + 1) + 2) for l in range(2 * lmax_grid + 1)])
+#     F_lap2 = F_sol.copy()
+#     w_lap2 = w_sol.copy()
+#     for l in range(F_lap2.coeffs.shape[1]):
+#         F_lap2.coeffs[:, l, :] *= lap2_by_degree[l]
+#         w_lap2.coeffs[:, l, :] *= lap2_by_degree[l]
+#     F_lap2_grid = F_lap2.expand(lmax=lmax_grid)
+#     w_lap2_grid = w_lap2.expand(lmax=lmax_grid)
+    
+#     w_grid = w_sol.expand(lmax=lmax_grid)
+#     a_grid = a_clm.expand(lmax=lmax_grid)
+#     Te_grid = T_e_parent.expand(lmax=lmax_grid)
+
+#     Re = R - T_e_0/2
+#     xi = 12*Re**2/Te_grid.data**2
+#     eta = xi/(1+xi)
+    
+#     lapl_S_grid = (Re*eta*a_grid.data*(1-nu)*(F_lap2_grid.data + 2*Omega_grid.data) 
+#               + eta/xi * w_lap2_grid.data  
+#               - 2*w_grid.data)
+    
+#     lapl_S_lm = pysh.SHGrid.from_array(lapl_S_grid).expand()
+     
+#     S_lm = lapl_S_lm.copy()
+#     for l in range(1, S_lm.coeffs.shape[1]):
+#         S_lm.coeffs[:, l, :] /= lap_by_degree[l]
+#     S_lm.coeffs[0, 0, 0] = 0.0  
+    
+#     S_lm = truncate(S_lm, lmax=lmax_calc)
+        
+#     return S_lm
+
+
+# def Principal_strainstress_angle(s_theta, s_phi, s_theta_phi):
+#     """
+#     Calculate principal strains, stresses, and
+#     their principal angles.
+
+#     Returns
+#     -------
+#     min_strain : array, size same as input arrays
+#         Array with the minimum principal horizontal strain or stress.
+#     max_strain : array, size same as input arrays
+#         Array with the maximum principal horizontal strain or stress.
+#     sum_strain : array, size same as input arrays
+#         Array with the sum of the principal horizontal strain or stress.
+#     principal_angle : array, size same as input arrays
+#         Array with the principal strain or stress direction in degrees.
+
+#     Parameters
+#     ----------
+#     s_theta : array, float, size(nlat, nlon)
+#         Array of the colatitude component of the stress or strain field.
+#     s_phi : array, float, size(nlat, nlon)
+#         Array of the longitude component of the stress or strain field.
+#     s_theta_phi : array, float, size(nlat, nlon)
+#         Array of the colatitude and longitude component of the stress or strain field.
+#     """
+
+#     min_strain = 0.5 * (
+#         (s_theta + s_phi) - np.sqrt((s_theta - s_phi) ** 2 + 4 * s_theta_phi**2)
+#     )
+#     max_strain = 0.5 * (
+#         (s_theta + s_phi) + np.sqrt((s_theta - s_phi) ** 2 + 4 * s_theta_phi**2)
+#     )
+#     sum_strain = min_strain + max_strain
+#     principal_angle = 0.5 * np.arctan2(2 * s_theta_phi, s_theta - s_phi) * 180.0 / np.pi
+
+#     return min_strain, max_strain, sum_strain, principal_angle
+
+
+
+# %% STRESS AND STRAIN FIELDS - WITH CHANGES TO ALIGN WITH DSP!
+
+kw_exp_grad = {"extend": False, "lmax_calc": LMAX_REF, "lmax": grid_expansion_res, "grid": "DH2"}
+kw_exp_S = {"lmax_calc": LMAX_REF, "lmax": grid_expansion_res, "grid": "DH2"}
 
 
 def O1(SH_function, lmax):
     """ Beuthe (2008)'s differential operator O_1 in 2D spherical geometry. """
-    SH_function_grid = SH_function.expand(lmax=lmax)
-    dtheta_grid = SH_function.gradient(lmax=lmax).theta
-    dtheta_sh = dtheta_grid.expand()
-    dtheta2_grid = dtheta_sh.gradient(lmax=lmax).theta
-    return dtheta2_grid.data + SH_function_grid.data
+    theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1), endpoint=False))
+
+    cot_theta = np.divide( 1.0, np.tan(theta_range), 
+                          out=np.zeros_like(np.tan(theta_range)), 
+                          where=np.tan(theta_range) != 0)
+    cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+
+    sin_theta = np.sin(theta_range)
+    sin_theta_grid = np.tile(sin_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+
+    csc2_theta = np.divide( 1.0, (np.sin(theta_range))**2, 
+                          out=np.zeros_like((np.sin(theta_range))**2), 
+                          where=(np.sin(theta_range))**2 != 0)
+    csc2_theta_grid = np.tile(csc2_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+    
+    dtheta_grid = SH_function.gradient(**kw_exp_grad).theta    
+    
+    dphi_grid = SH_function.gradient(**kw_exp_grad).phi
+    dphi_grid.data *= sin_theta_grid
+    dphi_sh = dphi_grid.expand(lmax_calc=LMAX_REF)
+    dphi2_grid = dphi_sh.gradient(**kw_exp_grad).phi
+    dphi2_grid.data *= sin_theta_grid    
+    
+    lmax_func = SH_function.lmax
+    SH_function_grid = SH_function.expand(**kw_exp_grad)
+
+    # Laplacian identity for d2_theta            
+    lapla_a = pysh.SHCoeffs.from_zeros(lmax_func)
+    for l in range(lmax_func + 1):
+        lapla_a.coeffs[:, l, : l + 1] = -l * (l + 1)
+    
+    # print("SH_function info", SH_function.info)
+    # print("lapla_a info", lapla_a.info)
+    
+    SH_function_dtheta2 = (
+                        (SH_function * lapla_a).expand(**kw_exp_grad).data 
+                        - dtheta_grid.data*cot_theta_grid 
+                        - dphi2_grid.data*csc2_theta_grid
+                        )
+    
+    return SH_function_dtheta2 + SH_function_grid.data
 
 def O2(SH_function, lmax):
     """ Beuthe (2008)'s differential operator O_2 in 2D spherical geometry. """
-    SH_function_grid = SH_function.expand(lmax=lmax)
-    dtheta_grid = SH_function.gradient(lmax=lmax).theta
+    theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1), endpoint=False))
 
-    dphi_grid = SH_function.gradient(lmax=lmax).phi
-    dphi_sh = dphi_grid.expand()
-    dphi2_grid = dphi_sh.gradient(lmax=lmax).phi
-    
-    theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1)+1))
-    cot_theta = 1/np.tan(theta_range)
-    cot_theta[0] = 0; cot_theta[-1] = 0
-    cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
-    
+    cot_theta = np.divide( 1.0, np.tan(theta_range), 
+                          out=np.zeros_like(np.tan(theta_range)), 
+                          where=np.tan(theta_range) != 0)
+    cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+
+    sin_theta = np.sin(theta_range)
+    sin_theta_grid = np.tile(sin_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+
+    csc_theta = np.divide( 1.0, np.sin(theta_range), 
+                          out=np.zeros_like(np.sin(theta_range)), 
+                          where=np.sin(theta_range) != 0)
+    csc_theta_grid = np.tile(csc_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+
+    SH_function_grid = SH_function.expand(**kw_exp_grad)
+    dtheta_grid = SH_function.gradient(**kw_exp_grad).theta
+
+    dphi_grid = SH_function.gradient(**kw_exp_grad).phi
+    dphi_grid.data *= sin_theta_grid
+    dphi_sh = dphi_grid.expand(lmax_calc=LMAX_REF)
+    dphi2_grid = dphi_sh.gradient(**kw_exp_grad).phi
+    dphi2_grid.data *= csc_theta_grid
+
     return dphi2_grid.data + cot_theta_grid * dtheta_grid.data + SH_function_grid.data
 
 def O3(SH_function, lmax):
     """ Beuthe (2008)'s differential operator O_3 in 2D spherical geometry. """
-    dphi_grid = SH_function.gradient(lmax=lmax).phi
+    theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1), endpoint=False))
 
-    dtheta_grid = SH_function.gradient(lmax=lmax).theta
-    dtheta_sh = dtheta_grid.expand()
-    dthetaphi_grid = dtheta_sh.gradient(lmax=lmax).phi
+    cot_theta = np.divide( 1.0, np.tan(theta_range), 
+                          out=np.zeros_like(np.tan(theta_range)), 
+                          where=np.tan(theta_range) != 0)
+    cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)))
 
-    theta_range = np.radians(np.linspace(0, 180, 2*(lmax+1)+1))
-    cot_theta = 1/np.tan(theta_range)
-    cot_theta[0] = 0; cot_theta[-1] = 0
-    cot_theta_grid = np.tile(cot_theta.reshape(-1, 1), (1, 4*(lmax+1)+1))
+    sin_theta = np.sin(theta_range)
+    sin_theta_grid = np.tile(sin_theta.reshape(-1, 1), (1, 4*(lmax+1)))
 
-    return dthetaphi_grid.data - cot_theta_grid * dphi_grid.data
+    csc_theta = np.divide( 1.0, np.sin(theta_range), 
+                          out=np.zeros_like(np.sin(theta_range)), 
+                          where=np.sin(theta_range) != 0)
+    csc_theta_grid = np.tile(csc_theta.reshape(-1, 1), (1, 4*(lmax+1)))
+
+    dphi_grid = SH_function.gradient(**kw_exp_grad).phi
+    dphi_grid.data *= sin_theta_grid
+
+    dphi_sh = dphi_grid.expand(lmax_calc=LMAX_REF)
+    dthetaphi_grid = dphi_sh.gradient(**kw_exp_grad).theta
+
+    return (csc_theta_grid * dthetaphi_grid.data 
+            - cot_theta_grid * csc_theta_grid * dphi_grid.data)
 
 
 
@@ -2081,9 +2470,9 @@ def stress_fields(S_sol, w_sol, T_e_parent, lmax, R, T_e_0, depth=0.0):
     """
     O1S = O1(S_sol, lmax); O2S = O2(S_sol, lmax); O3S = O3(S_sol, lmax)
     O1w = O1(w_sol, lmax); O2w = O2(w_sol, lmax); O3w = O3(w_sol, lmax)
-    S_grid  = S_sol.expand(lmax=lmax)
-    w_grid  = w_sol.expand(lmax=lmax)
-    Te_grid = T_e_parent.expand(lmax=lmax)
+    S_grid  = S_sol.expand(**kw_exp_grad)
+    w_grid  = w_sol.expand(**kw_exp_grad)
+    Te_grid = T_e_parent.expand(**kw_exp_grad)
 
     # membrane strains (Banerdt A16-A18 with S in place of A)
     eps_t    = 1/R * (O1S - S_grid.data + w_grid.data)
@@ -2189,23 +2578,16 @@ def strain_fields(S_sol, w_sol, T_e_parent, lmax, R, T_e_0, depth=0.0):
     Total strains in the DSP/Banerdt convention (membrane + top-fiber
     bending), matching DSP's tot_theta / tot_phi / tot_thetaphi:
         tot = eps + eps_f*kappa,  eps_f = (Te/2-depth)/(1+(Te/2-depth)/R)
+    
     MISSING THE TOROIDAL DISPLACEMENT POTENTIAL T TERMS!
-
-    FIXES vs previous version:
-    (1) the returned fields previously OVERWROTE the totals with the
-        membrane-only strains (tot_eps_tt = SHGrid(eps_t)), silently
-        discarding the entire bending contribution -- which is comparable
-        to the membrane strains at Te ~ 268 km;
-    (2) kernels switched 1/Re -> 1/R and the bending factor to
-        zeta/(1+zeta/R), matching the DSP benchmark convention.
     """
     # Return diff operator applied S and w terms, in grid.data format
     O1S = O1(S_sol, lmax); O2S = O2(S_sol, lmax); O3S = O3(S_sol, lmax)
     O1w = O1(w_sol, lmax); O2w = O2(w_sol, lmax); O3w = O3(w_sol, lmax)
     
-    S_grid  = S_sol.expand(lmax=lmax)
-    w_grid  = w_sol.expand(lmax=lmax)
-    Te_grid = T_e_parent.expand(lmax=lmax)
+    S_grid  = S_sol.expand(**kw_exp_grad)
+    w_grid  = w_sol.expand(**kw_exp_grad)
+    Te_grid = T_e_parent.expand(**kw_exp_grad)
 
     eps_t    = 1/R * (O1S - S_grid.data + w_grid.data)    
     eps_p    = 1/R * (O2S - S_grid.data + w_grid.data)
@@ -2229,33 +2611,28 @@ def strain_fields(S_sol, w_sol, T_e_parent, lmax, R, T_e_0, depth=0.0):
     return tot_eps_tt, tot_eps_pp, tot_eps_tp
 
 
-def cons_disp_S(w_sol, F_sol, Omega_grid, T_e_parent, a_clm, R, T_e_0, lmax):
+def cons_disp_S(w_sol, F_sol, Omega_sol, T_e_parent, a_clm, R, T_e_0, lmax_calc, lmax_grid):
     """ 
     Beuthe (2008)'s consoidal/poloidal tangential displacement potential S_lm 
     (A_lm in DSP/Banerdt (1986)). Used in computations of strain.
     """
     
-    lap_by_degree = np.array([(-l * (l + 1)) for l in range(2 * lmax + 1)])
-    lap2_by_degree = np.array([(-l * (l + 1) + 2) for l in range(2 * lmax + 1)])
+    lap_by_degree = np.array([(-l * (l + 1)) for l in range(2 * lmax_grid + 1)])
+    lap2_by_degree = np.array([(-l * (l + 1) + 2) for l in range(2 * lmax_grid + 1)])
     F_lap2 = F_sol.copy()
     w_lap2 = w_sol.copy()
     for l in range(F_lap2.coeffs.shape[1]):
         F_lap2.coeffs[:, l, :] *= lap2_by_degree[l]
         w_lap2.coeffs[:, l, :] *= lap2_by_degree[l]
-    F_lap2_grid = F_lap2.expand(lmax=lmax)
-    w_lap2_grid = w_lap2.expand(lmax=lmax)
+    F_lap2_grid = F_lap2.expand(**kw_exp_S)
+    w_lap2_grid = w_lap2.expand(**kw_exp_S)
     
-    w_grid = w_sol.expand(lmax=lmax)
-    a_grid = a_clm.expand(lmax=lmax)
-    Te_grid = T_e_parent.expand(lmax=lmax)
+    w_grid = w_sol.expand(**kw_exp_S)
+    a_grid = a_clm.expand(**kw_exp_S)
+    Te_grid = T_e_parent.expand(**kw_exp_S)
+    Omega_grid = Omega_sol.expand(**kw_exp_S)
 
     Re = R - T_e_0/2
-    # FIX: xi from Re, not R -- DSP's A_lm formula (Beuthe 2008 eq 89) uses
-    # eps = 12*Re^2/Te^2 and beta = 1/(1+eps) built with Re. Verified per
-    # degree: with xi(Re) and Omega = Re*omega, S matches DSP's A_lm to
-    # <0.25% (formulation floor); xi(R) leaves up to 0.7%.
-    # NOTE: this function expects Omega_grid = Beuthe's Omega = Re*omega,
-    # i.e. the output of the corrected compute_Omega.
     xi = 12*Re**2/Te_grid.data**2
     eta = xi/(1+xi)
     
@@ -2266,9 +2643,11 @@ def cons_disp_S(w_sol, F_sol, Omega_grid, T_e_parent, a_clm, R, T_e_0, lmax):
     lapl_S_lm = pysh.SHGrid.from_array(lapl_S_grid).expand()
      
     S_lm = lapl_S_lm.copy()
-    S_lm.coeffs[:, 0, :] = 0.0     
     for l in range(1, S_lm.coeffs.shape[1]):
         S_lm.coeffs[:, l, :] /= lap_by_degree[l]
+    S_lm.coeffs[0, 0, 0] = 0.0  
+    
+    S_lm = truncate(S_lm, lmax=lmax_calc)
         
     return S_lm
 
@@ -2311,10 +2690,12 @@ def Principal_strainstress_angle(s_theta, s_phi, s_theta_phi):
     return min_strain, max_strain, sum_strain, principal_angle
 
 
+
+
 # %% BEUTHE MODEL SOLVER
 
 def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
-                 T_e_0, g0, mass, rhs_override=None, omega_on=True,
+                 T_e_0, g0, mass,
                  D_eta_clm=None, a_eta_clm=None, eta_clm=None):
     """
     ETA_FULL mode (all three eta kwargs provided): implements Beuthe's
@@ -2332,7 +2713,6 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
     mode_map = make_mode_map(lmax)
     N = len(mode_map)
     Re   = R - T_e_0/2
-    buoy = (Re/T_e_0)**3 * (Re/E) * g0 * (rho_m-rho_c)
     scaler_A = 1.0/(E*T_e_0**3)
     scaler_B = Re
  
@@ -2380,7 +2760,8 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
     (Omega_LHS_2_Phata_unstr,
      Omega_LHS_2a_unstr, Omega_LHS_2b_unstr, Omega_LHS_2c_unstr,
      Omega_LHS_2d_dc_unstr, maxa_raw_unstr) = (
-        Omega_eq2_LHS(T_e_parent, a_eta_clm, lmax=lmax, R=R, T_e_0=T_e_0, Re=Re, g0=g0, mass=mass))
+        # Omega_eq2_LHS(T_e_parent, a_eta_clm, lmax=lmax, R=R, T_e_0=T_e_0, Re=Re, g0=g0, mass=mass))
+        Omega_eq2_LHS(T_e_parent, a_clm, lmax=lmax, R=R, T_e_0=T_e_0, Re=Re, g0=g0, mass=mass))    # ETA FIELD FIX
     
     # terms 2a, 2b, 2c (+2d, zero) -- carry Delta' at the OUTPUT degree.
     # b_tilde FIX (non-symmetric pathway): previously assembled per cell with
@@ -2408,7 +2789,7 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
     B = np.zeros((N, N))
     for c in range(ci.size):
         i, j = int(ci[c]), int(cj[c])
-        vA = cellA[c] + (buoy if i == j and omega_on == False else 0.0)
+        vA = cellA[c]
         vA_tilde = cellA_tilde[c]   # 1b now a Tcind FIELD inside field_ac (Te<Tc fix)
         vB = cellB[c]
         
@@ -2496,9 +2877,35 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
         Pw=(Pw_diag if _use_dc else np.eye(N)),
         Tcind_unstr=g2['Tcind_unstr'], gTemax_unstr=g2['gTemax_unstr'])
 
-    A = A + A_tilde + A_tilde_group2
+    # A = A + A_tilde + A_tilde_group2
+
+
+    # ETA FIELD FIX
+    # ---- ETA-FIELD (Path 1) -------------------------------------------
+    # Beuthe writes  eta * [ the whole Omega operator ], so eta is applied
+    # ONCE here to the assembled Omega blocks rather than being threaded
+    # into each individual field (which is ambiguous for terms whose c1 and
+    # c2 halves share a field). eta is evaluated at the LOCAL Te.
+    #   eta * (A_omega @ w)  =  (conv(eta) @ A_omega) @ w
+    # At constant Te, eta_grid is a monopole equal to eta0, so
+    # C_eta = eta0 * I and every constant-Te benchmark is preserved exactly.
+    _Te_grid_eta = T_e_parent.expand(lmax=3*lmax).data
+    _Re_grid_eta = R - _Te_grid_eta/2.0
+    eta_grid_sb  = 1.0/(1.0 + _Te_grid_eta**2/(12.0*_Re_grid_eta**2))
+    eta_clm_sb   = pysh.SHGrid.from_array(eta_grid_sb).expand()
+    eta_unstr    = pysh.shio.SHCilmToVector(
+                     pysh.SHCoeffs.from_array(
+                       eta_clm_sb.coeffs[:, :2*lmax+1, :2*lmax+1]).coeffs)
+    C_eta = build_conv_matrix(eta_unstr, gidx, plan['term_gaunt_bare'],
+                              starts, seg_len, ci, cj, N)
+
+    # eq-1 Omega LHS block = A_tilde + A_tilde_group2  ->  eta * (that)
+    A = A + C_eta @ (A_tilde + A_tilde_group2)
+
 
     # ---- q's w-coupling: LHS diagonal, branch-dependent ---------------
+    # NOTE: Lam_q is NOT an Omega term -- it comes from q -- so it is added
+    # AFTER the C_eta multiplication above and must NOT be wrapped by C_eta.
     # dc branch  : Lam_q = qH with rho_l -> drhol   (zero iff rho_l==rho_c)
     # drho branch: Lam_q_drho (built in Omega_eq1_LHS) -- nonzero even at
     #              rho_l == rho_c, since the g_m*drho term survives.
@@ -2523,8 +2930,13 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
         Lap_d   = np.diag(np.array([-l*(l+1) for l, _ in mode_map],
                                    dtype=np.float64))
         PhatDw  = C_Phat @ Dw_diag
-        A = A + g2['fdrho_om1'] * PhatDw
-        A = A + g2['fdrho_om2'] * (C_Te2 @ Lap_d @ PhatDw)
+        # A = A + g2['fdrho_om1'] * PhatDw
+        # A = A + g2['fdrho_om2'] * (C_Te2 @ Lap_d @ PhatDw)
+
+        # ETA FIELD FIX : these are eq-1 Omega LHS terms -> carry conv(eta).
+        A = A + C_eta @ (g2['fdrho_om1'] * PhatDw)
+        A = A + C_eta @ (g2['fdrho_om2'] * (C_Te2 @ Lap_d @ PhatDw))
+
 
     # b_tilde: non-symmetric matrix form (see b_tilde FIX above):
     # diag(Delta'_out) @ conv(2a + 2b + 2c fields). Reduces exactly to
@@ -2564,7 +2976,11 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
                                       starts, seg_len, ci, cj, N)
         b_tilde = b_tilde + np.diag(d_l2) @ C_Phata @ Dw_diag_2
 
-    b = b + b_tilde
+    # b = b + b_tilde
+    
+    # ETA FIELD FIX : b_tilde is the assembled eq-2 Omega LHS operator (2a/2b/2c
+    # plus the dc and drho couplings above) -> apply conv(eta) once.
+    b = b + C_eta @ b_tilde        # was:  b = b + b_tilde
         
     # assemble 2N x 2N dense system
     M = np.zeros((2*N, 2*N))
@@ -2591,10 +3007,13 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
     Omega_RHS1_unstr = Omega_eq1_RHS(topo_clm, geoid_clm, T_e_parent, 
                                      lmax=lmax, R=R, T_e_0=T_e_0, Re=Re, 
                                      g0=g0, mass=mass)
-    Omega_RHS2_unstr = Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_eta_clm, 
+    # Omega_RHS2_unstr = Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_eta_clm, 
+    #                                  lmax=lmax, R=R, T_e_0=T_e_0, Re=Re, 
+    #                                  g0=g0, mass=mass)
+    Omega_RHS2_unstr = Omega_eq2_RHS(topo_clm, geoid_clm, T_e_parent, a_clm,       # ETA FIELD FIX 
                                      lmax=lmax, R=R, T_e_0=T_e_0, Re=Re, 
                                      g0=g0, mass=mass)
-    
+
     def elem(l,m,v):
         off = 0 if m==0 else (m if m>0 else l+abs(m))
         return v[l*l+off]
@@ -2602,7 +3021,12 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
     q = np.array([elem(l,m,q_lm_unstr) for l,m in mode_map])
     Omega_RHS1 = np.array([elem(l,m,Omega_RHS1_unstr) for l,m in mode_map])
     Omega_RHS2 = np.array([elem(l,m,Omega_RHS2_unstr) for l,m in mode_map])
- 
+    # ETA FIELD FIX : the Omega RHS vectors are the same Omega operator acting on
+    # the KNOWN fields (H, G), so eta multiplies them too. In spectral form
+    # that is the same convolution: eta*Omega_RHS = C_eta @ Omega_RHS.
+    # (q is NOT an Omega term and is deliberately left untouched.)
+    Omega_RHS1 = C_eta @ Omega_RHS1
+    Omega_RHS2 = C_eta @ Omega_RHS2
  
     y1 = q + Omega_RHS1
     y2 = Omega_RHS2
@@ -2639,7 +3063,6 @@ def solve_beuthe(topo_clm, geoid_clm, T_e_parent, D_clm, a_clm, plan, lmax, R,
 if __name__ == "__main__":
     t_begin = time.perf_counter()
     selftest_gaunt()
-    LMAX_REF = max(LMAX_RUNS)
     topo_p, geoid_p, T_e_parent, R, g0, mass = load_inputs(LMAX_REF, strain=strain)
     T_e_0 = T_e_parent.coeffs[0,0,0]
     print(f'T_e_0 = {T_e_0/1e3:.2f} km')
@@ -2647,6 +3070,7 @@ if __name__ == "__main__":
 
     solutions_w = {}
     solutions_F = {}
+    solutions_q = {}
     for lmax_run in LMAX_RUNS:
         topo_clm  = truncate(topo_p,  lmax_run)
         geoid_clm = truncate(geoid_p, lmax_run)
@@ -2672,19 +3096,20 @@ if __name__ == "__main__":
             print('Start solving of system')
             t = time.perf_counter()
             w, F, q = solve_beuthe(topo_use, geoid_use, T_e_use, D_use, a_use, plan, 
-                             lmax_run, R, T_e_0, g0, mass, omega_on=omega_On,
+                             lmax=lmax_run, R=R, T_e_0=T_e_0, g0=g0, mass=mass,
                              D_eta_clm=D_eta_use, a_eta_clm=a_eta_use,
                              eta_clm=eta_use)
             print(f'Finished solving of system in {(time.perf_counter()-t):.1f}s\n')
             solutions_w[lmax_run, rotation] = w
             solutions_F[lmax_run, rotation] = F
+            solutions_q[lmax_run, rotation] = q
 
     
-# %% POWER SPECTRUM w + RESIDUAL RATIO IF ROTATION IS APPLIED
+# %% PLOTS - POWER SPECTRUM w + RESIDUAL RATIO IF ROTATION IS APPLIED
     
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10,9))
-    for rotated in range(2):
+    for rotated in (range(2) if do_rotation_check else range(1)):
         linestyle = 'solid' if rotated == 0 else 'dashed'
         solutions_w[LMAX_REF, rotated].plot_spectrum(ax=ax1, show=False, 
                         legend=(f'lmax={LMAX_REF}'+ 
@@ -2703,7 +3128,8 @@ if __name__ == "__main__":
     else:
         ax2.set_visible(False)
 
-    ax1.set_title('M4 - Power spectra of w (Plesa Te Map)')
+    ax1.set_title('M4 - Power spectra of w ' 
+                  + ('(Plesa Te Map)' if strain != 0 else '' ))
     ax1.legend()
     ax1.set_ylim(1e-2)
     plt.tight_layout()
@@ -2769,7 +3195,7 @@ if __name__ == "__main__":
     
     args_plot = dict(tick_interval=[45, 30])
 
-    topography_km = topo_use_clm.expand(lmax=3*LMAX_REF)
+    topography_km = topo_use_clm.expand(lmax=grid_expansion_res)
     topography_km.data = (topography_km.data - R)/1e3
     topo_min, topo_max = topography_km.data.min(), topography_km.data.max()
     cmap_limits_topo_diff =[topo_min, 10]
@@ -2783,7 +3209,7 @@ if __name__ == "__main__":
     ax0.set_title(f'M4 - MOLA topography map, exp. to lmax={LMAX_REF}'
                   + (f', rot={rotate_angles}' if rotation else ''))
     
-    T_e_parent_km = T_e_use_clm.expand(lmax=3*lmax_Te_fit)
+    T_e_parent_km = T_e_use_clm.expand(lmax=grid_expansion_res)
     T_e_parent_km.data = T_e_parent_km.data/1e3
     T_e_parent_km.plot(ax=ax1, 
                        ticks = 'wSne',
@@ -2795,14 +3221,14 @@ if __name__ == "__main__":
                        **args_plot)
     ax1.set_title(f'M4 - Te input map (Plesa et al. 2018), exp. to lmax={lmax_Te_fit}'
                   + (f', rot={rotate_angles}' if rotation else ''))
-    D_use_clm.expand(lmax=3*lmax_Te_fit).plot(ax=ax2, 
+    D_use_clm.expand(lmax=grid_expansion_res).plot(ax=ax2, 
                                         cmap=cmc.lajolla, 
                                         colorbar='right', 
                                         cb_label=r'$D \ [N\cdot m]$',
                                         **args_plot)  
     ax2.set_title(f'M4 - Flexural rigidity D (Te-derived), exp. to lmax={lmax_Te_fit}'
                   + (f', rot={rotate_angles}' if rotation else ''))
-    a_use_clm.expand(lmax=3*lmax_Te_fit).plot(ax=ax3, 
+    a_use_clm.expand(lmax=grid_expansion_res).plot(ax=ax3, 
                                         cmap=cmc.lajolla, 
                                         colorbar='right', 
                                         cb_label=r'$\alpha \ [m/N$]',
@@ -2822,261 +3248,171 @@ if __name__ == "__main__":
         
 # %% PLOTS - 2D DEFLECTION MAP + RESIDUAL BETWEEN LAST TWO LMAX RUNS
 
-    # # 2D deflection map + difference between lmax runs
-    # do_rotation_check = any(angle != 0.0 for angle in rotate_angles)
-    # if do_rotation_check:
-    #     w_fine = pysh.SHGrid.from_array(
-    #             solutions_w[LMAX_REF, 1].expand(lmax=3*LMAX_REF).data/1e3)
-    #     if len(LMAX_RUNS)>1:
-    #         lo = LMAX_RUNS[-2] 
-    #         d = (solutions_w[LMAX_REF, 1].coeffs[:, :lo+1, :lo+1] 
-    #              - solutions_w[lo, 1].coeffs[:, :lo+1, :lo+1])
-    #         w_diff = pysh.SHCoeffs.from_array(d).expand(lmax=3*LMAX_REF)
-    # else:
-    #     w_fine = pysh.SHGrid.from_array(
-    #             solutions_w[LMAX_REF, 0].expand(lmax=3*LMAX_REF).data/1e3)        
-    #     if len(LMAX_RUNS)>1:
-    #         lo = LMAX_RUNS[-2] 
-    #         d = (solutions_w[LMAX_REF, 0].coeffs[:, :lo+1, :lo+1] 
-    #              - solutions_w[lo, 0].coeffs[:, :lo+1, :lo+1])
-    #         w_diff = pysh.SHCoeffs.from_array(d).expand(lmax=3*LMAX_REF)
+    # Only plot this when performing multiple lmax runs
+    if len(LMAX_RUNS)>1:
+        do_rotation_check = any(angle != 0.0 for angle in rotate_angles)
+        if do_rotation_check:
+            w_fine = pysh.SHGrid.from_array(
+                    solutions_w[LMAX_REF, 1].expand(lmax=grid_expansion_res).data/1e3)
+            if len(LMAX_RUNS)>1:
+                lo = LMAX_RUNS[-2] 
+                d = (solutions_w[LMAX_REF, 1].coeffs[:, :lo+1, :lo+1] 
+                     - solutions_w[lo, 1].coeffs[:, :lo+1, :lo+1])
+                w_diff = pysh.SHCoeffs.from_array(d).expand(lmax=grid_expansion_res)
+        else:
+            w_fine = pysh.SHGrid.from_array(
+                    solutions_w[LMAX_REF, 0].expand(lmax=grid_expansion_res).data/1e3)        
+            if len(LMAX_RUNS)>1:
+                lo = LMAX_RUNS[-2] 
+                d = (solutions_w[LMAX_REF, 0].coeffs[:, :lo+1, :lo+1] 
+                     - solutions_w[lo, 0].coeffs[:, :lo+1, :lo+1])
+                w_diff = pysh.SHCoeffs.from_array(d).expand(lmax=grid_expansion_res)
+                
+        if len(LMAX_RUNS)>1:
+            fig3, (a1,a2) = plt.subplots(2,1, figsize=(12,10))
+            w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]',
+                        # cmap_limits=[-24,11]
+                        )
+            a1.set_title(f'M4 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
+                         + (f', rot={rotate_angles}' if rotation else ''))
+    
+            a1.contour(w_fine.data>0, 
+                       levels=[0.99], 
+                       extent=(0,360,-90,90), 
+                       colors='k', 
+                       origin='upper')
+            w_diff.plot(ax=a2, cmap=cmap1, colorbar='right', cb_label='w diff [m]', 
+                        # cmap_limits=[-320,200]
+                        )
+            a2.set_title(f'M4 - Residual w: lmax={LMAX_REF} minus lmax={lo}'
+                         + (f', rot={rotate_angles}' if rotation else ''))
             
-    # if len(LMAX_RUNS)>1:
-    #     fig3, (a1,a2) = plt.subplots(2,1, figsize=(12,10))
-    #     w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]',
-    #                 # cmap_limits=[-24,11]
-    #                 )
-    #     a1.set_title(f'M4 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
-    #                  + (f', rot={rotate_angles}' if rotation else ''))
-
-    #     a1.contour(w_fine.data>0, 
-    #                levels=[0.99], 
-    #                extent=(0,360,-90,90), 
-    #                colors='k', 
-    #                origin='upper')
-    #     w_diff.plot(ax=a2, cmap=cmap1, colorbar='right', cb_label='w diff [m]', 
-    #                 # cmap_limits=[-320,200]
-    #                 )
-    #     a2.set_title(f'M4 - Residual w: lmax={LMAX_REF} minus lmax={lo}'
-    #                  + (f', rot={rotate_angles}' if rotation else ''))
+        else:
+            fig3, a1 = plt.subplots(figsize=(12,10))
+            w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]')
+            a1.set_title(f'M4 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
+                         + (f', rot={rotate_angles}' if rotation else ''))
+    
+            a1.contour(w_fine.data>0, 
+                       levels=[0.99], 
+                       extent=(0,360,-90,90), 
+                       colors='k', 
+                       origin='upper')
         
-    # else:
-    #     fig3, a1 = plt.subplots(figsize=(12,10))
-    #     w_fine.plot(ax=a1, cmap=cmap1, colorbar='right', cb_label='w [km]')
-    #     a1.set_title(f'M4 - Transverse displacement w Beuthe-model (lmax={LMAX_REF})'
-    #                  + (f', rot={rotate_angles}' if rotation else ''))
+        plt.tight_layout()
+        if SaveFigs:
+            plt4_title = (f'M4 - Displacement w 2D map, lmax_run={LMAX_RUNS}, '
+                          f'lmaxTe={lmax_Te_fit}'
+                          + (f', rotated {rotate_angles}' if rotation else '') 
+                          + '.png')
+            FigPath4 = os.path.join(SavePath, plt4_title)
+            plt.savefig(FigPath4, dpi=200)
+            print(f"Saved Figures to subfolder: {SavePath}")
+        plt.show(); plt.close()
+    
+    
 
-    #     a1.contour(w_fine.data>0, 
-    #                levels=[0.99], 
-    #                extent=(0,360,-90,90), 
-    #                colors='k', 
-    #                origin='upper')
-    
-    # plt.tight_layout()
-    # if SaveFigs:
-    #     plt4_title = (f'M4 - Displacement w 2D map, lmax_run={LMAX_RUNS}, '
-    #                   f'lmaxTe={lmax_Te_fit}'
-    #                   + (f', rotated {rotate_angles}' if rotation else '') 
-    #                   + '.png')
-    #     FigPath4 = os.path.join(SavePath, plt4_title)
-    #     plt.savefig(FigPath4, dpi=200)
-    #     print(f"Saved Figures to subfolder: {SavePath}")
-    # plt.show(); plt.close()
-    
-    
-# %% PLOTS - DSP-M4 RESIDUAL PLOTS BETTER LAYOUT
-    
-    grid_expansion = 3*LMAX_REF
+# %% PLOTS - DSP-M4 RESIDUAL PLOTS
+        
+    # Set whether to include crustal thickness in the plots
+    show_Tc = True         
+    args_expand = dict(lmax=grid_expansion_res, lmax_calc=LMAX_REF)
+    args_plot = dict(tick_interval=[45, 30], grid=True)
+
     
     w_fine = pysh.SHGrid.from_array(
-            solutions_w[LMAX_REF, 0].expand(lmax=grid_expansion).data/1e3)
+            solutions_w[LMAX_REF, 0].expand(**args_expand).data/1e3)
     w_clm = solutions_w[LMAX_REF, 0]
-    dc_clm = compute_dc(w_clm, topo_clm, geoid_clm, R=R, lmax=LMAX_REF)
+    dc_clm = compute_dc(w_clm, topo_clm, geoid_clm, R=R, lmax_calc=LMAX_REF, lmax_grid=grid_expansion_res)
     dc_clm_zeroed = dc_clm.copy()
     dc_clm_zeroed.coeffs[0,0,0] = 0
-    dc_grid = dc_clm_zeroed.expand(lmax=grid_expansion)/1e3
+    dc_grid = dc_clm_zeroed.expand(**args_expand)/1e3
     
-    drho_clm = compute_drho(w_clm, topo_clm, geoid_clm, R=R, lmax=LMAX_REF)
+    drho_clm = compute_drho(w_clm, topo_clm, geoid_clm, R=R, lmax_calc=LMAX_REF, lmax_grid=grid_expansion_res)
     drho_clm_zeroed = drho_clm.copy()
     drho_clm_zeroed.coeffs[0,0,0] = 0
-    drho_grid = drho_clm_zeroed.expand(lmax=grid_expansion)
+    drho_grid = drho_clm_zeroed.expand(**args_expand)
     
-    topo_grid = topo_clm.expand(lmax=grid_expansion)/1e3 - R/1e3
+    topo_grid = topo_clm.expand(**args_expand)/1e3 - R/1e3
     
-    T_c_grid = topo_grid.data + dc_grid.data - w_fine.data + T_c*np.ones((2*(grid_expansion+1)+1, 4*(grid_expansion+1)+1))/1e3
+    T_c_grid = (topo_grid.data 
+                + (dc_grid.data if solve_for=='dc_lm' else 0)
+                - w_fine.data 
+                + T_c*np.ones((2*(grid_expansion_res+1)+1, 4*(grid_expansion_res+1)+1))/1e3)
     T_c_grid = pysh.SHGrid.from_array(T_c_grid)
     
     # Load in DSP results
     w_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_w_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
     dc_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_dc_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
     drho_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_drho_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
-    Tc_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_Tc_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    Tc_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_Tc_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
     
-        
-# # PLOTTING
-#     import matplotlib.gridspec as gridspec
-#     import matplotlib.colors as mcolors
-#     import matplotlib.cm as cm
-
-#     args_expand = dict(lmax=grid_expansion, lmax_calc=LMAX_REF)
-#     args_plot = dict(tick_interval=[45, 30])
-
-#     # 1. Increase overall figure height to accommodate larger plots and clear spacing
-#     fig = plt.figure(figsize=(16, 14))
     
-#     # 2. Outer grid controls the 3 main data rows. 
-#     # Increase hspace here to add massive spacing BETWEEN your rows.
-#     outer_gs = gridspec.GridSpec(3, 1, hspace=-0.15) 
-
-#     # --- ROW 1: Radial Displacement w ---
-#     # inner_gs creates a sub-layout for the 3 plots + colorbars in Row 1
-#     # height_ratios=[1, 0.05] places a thin colorbar strip tightly underneath
-#     inner_gs1 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[0], 
-#                                                  height_ratios=[1, 0.03], hspace=-0.5, wspace=0.15)
-#     ax1 = fig.add_subplot(inner_gs1[0, 0:2])
-#     ax2 = fig.add_subplot(inner_gs1[0, 2:4])
-#     ax3 = fig.add_subplot(inner_gs1[0, 4:6])
+    # Compute residuals between DSP and M4 spatially
+    grid_w_DSP = pysh.SHCoeffs.from_array(w_DSP.coeffs / 1e3).expand(**args_expand)
+    w_diff_DSPM4 = grid_w_DSP.copy()
+    w_diff_DSPM4.data = grid_w_DSP.data - w_fine.data
     
-#     # Shared colorbar spans underneath columns 0 and 1
-#     cax_w_shared = fig.add_subplot(inner_gs1[1, 1:3])
-#     # Residual colorbar spans exactly underneath column 2 (Perfect 1:1 width match)
-#     cax_w_diff   = fig.add_subplot(inner_gs1[1, 4:6])
-
-#     grid_w_DSP = pysh.SHCoeffs.from_array(w_DSP.coeffs / 1e3).expand(**args_expand)
-#     grid_w_DSP.plot(ax=ax1, cmap_limits=[-7, 3], cmap=cmap3, colorbar=None, ticks='Wsen', xlabel=None, **args_plot)
-#     ax1.set_title('DSP - Radial displacement w', fontweight="bold")
+    grid_dc_DSP = pysh.SHCoeffs.from_array(dc_DSP.coeffs / 1e3).expand(**args_expand)
+    dc_diff_DSPM4 = grid_dc_DSP.copy()
+    dc_diff_DSPM4.data = grid_dc_DSP.data - dc_grid.data
     
-#     w_fine.plot(ax=ax2, cmap_limits=[-7, 3], cmap=cmap3, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
-#     ax2.set_title('M4 - Radial displacement w', fontweight="bold")
+    grid_drho_DSP = pysh.SHCoeffs.from_array(drho_DSP.coeffs).expand(**args_expand)
+    drho_diff_DSPM4 = grid_drho_DSP.copy()
+    drho_diff_DSPM4.data = grid_drho_DSP.data - drho_grid.data
     
-#     w_diff_DSPM3 = grid_w_DSP.copy()
-#     w_diff_DSPM3.data = grid_w_DSP.data - w_fine.data
-#     w_min, w_max = w_diff_DSPM3.data.min(), w_diff_DSPM3.data.max()
-#     w_diff_DSPM3.plot(ax=ax3, cmap=cmap2, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
-#     ax3.set_title('Radial displacement w residual DSP - M4', fontweight="bold")
-
-#     norm_w = mcolors.Normalize(vmin=-7, vmax=3)
-#     cb1 = fig.colorbar(cm.ScalarMappable(norm=norm_w, cmap=cmap3), cax=cax_w_shared, orientation='horizontal')
-#     cb1.set_label('w [km]', fontweight="bold")
-
-#     norm_w_diff = mcolors.Normalize(vmin=w_min, vmax=w_max)
-#     cb2 = fig.colorbar(cm.ScalarMappable(norm=norm_w_diff, cmap=cmap2), cax=cax_w_diff, orientation='horizontal')
-#     cb2.set_label('w [km]', fontweight="bold")
-
-#     ax1.contour(grid_w_DSP.data>0, levels=[0.99], extent=(0,360,-90,90), colors='k', origin='upper')
-#     ax2.contour(w_fine.data>0, levels=[0.99], extent=(0,360,-90,90), colors='k', origin='upper')
-
-
-#     # --- ROW 2: Crustal Root Variations ---
-#     inner_gs2 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[1], 
-#                                                  height_ratios=[1, 0.03], hspace=-0.45, wspace=0.15)
-#     ax4 = fig.add_subplot(inner_gs2[0, 0:2])
-#     ax5 = fig.add_subplot(inner_gs2[0, 2:4])
-#     ax6 = fig.add_subplot(inner_gs2[0, 4:6])
+    grid_Tc_DSP = pysh.SHCoeffs.from_array(Tc_DSP.coeffs / 1e3).expand(**args_expand)
+    Tc_diff_DSPM4 = grid_Tc_DSP.copy()
+    Tc_diff_DSPM4.data = grid_Tc_DSP.data - T_c_grid.data
     
-#     cax_dc_shared = fig.add_subplot(inner_gs2[1, 1:3])
-#     cax_dc_diff   = fig.add_subplot(inner_gs2[1, 4:6])
-
-#     grid_dc_DSP = pysh.SHCoeffs.from_array(dc_DSP.coeffs / 1e3).expand(**args_expand)
-#     grid_dc_DSP.plot(ax=ax4, cmap=cmap3, cmap_limits=[-50, 30], colorbar=None, ticks='Wsen', xlabel=None, **args_plot)
-#     ax4.set_title('DSP - Crustal root variations', fontweight="bold")
+    # Compute residuals between DSP and M4 spectrally
+    w_diff_DSPM4 = w_DSP - solutions_w[LMAX_REF,0]
+    w_diff_DSPM4 = w_diff_DSPM4.expand(**args_expand)
+    w_diff_DSPM4.data = w_diff_DSPM4.data / 1e3
     
-#     dc_grid.plot(ax=ax5, cmap=cmap3, cmap_limits=[-50, 30], colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
-#     ax5.set_title('M4 - Crustal root variations', fontweight="bold")
-
-#     dc_diff_DSPM3 = grid_dc_DSP.copy()
-#     dc_diff_DSPM3.data = grid_dc_DSP.data - dc_grid.data
-#     dc_min, dc_max = dc_diff_DSPM3.data.min(), dc_diff_DSPM3.data.max()
-#     dc_diff_DSPM3.plot(ax=ax6, cmap=cmap2, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
-#     ax6.set_title('Crustal root variations residual DSP - M4', fontweight="bold")
-
-#     norm_dc = mcolors.Normalize(vmin=-50, vmax=30)
-#     cb3 = fig.colorbar(cm.ScalarMappable(norm=norm_dc, cmap=cmap3), cax=cax_dc_shared, orientation='horizontal')
-#     cb3.set_label('$\\delta c$ [km]', fontweight="bold")
-
-#     norm_dc_diff = mcolors.Normalize(vmin=dc_min, vmax=dc_max)
-#     cb4 = fig.colorbar(cm.ScalarMappable(norm=norm_dc_diff, cmap=cmap2), cax=cax_dc_diff, orientation='horizontal')
-#     cb4.set_label('$\\delta c$ [km]', fontweight="bold")
-
-
-#     # --- ROW 3: Crustal Thickness ---
-#     inner_gs3 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[2], 
-#                                                  height_ratios=[1, 0.03], hspace=-0.35, wspace=0.15)
-#     ax7 = fig.add_subplot(inner_gs3[0, 0:2])
-#     ax8 = fig.add_subplot(inner_gs3[0, 2:4])
-#     ax9 = fig.add_subplot(inner_gs3[0, 4:6])
-    
-#     cax_tc_shared = fig.add_subplot(inner_gs3[1, 1:3])
-#     cax_tc_diff   = fig.add_subplot(inner_gs3[1, 4:6])
-
-#     grid_Tc_DSP = pysh.SHCoeffs.from_array(Tc_DSP.coeffs / 1e3).expand(**args_expand)
-#     grid_Tc_DSP.plot(ax=ax7, cmap=cmap3, cmap_limits=[0, 110], colorbar=None, ticks='WSen', **args_plot)
-#     ax7.set_title('DSP - Crustal thickness', fontweight="bold")
-    
-#     T_c_grid.plot(ax=ax8, cmap=cmap3, cmap_limits=[0, 110], colorbar=None, ticks='wSen', ylabel=None, **args_plot)
-#     ax8.set_title('M4 - Crustal thickness', fontweight="bold")
-
-#     Tc_diff_DSPM3 = grid_Tc_DSP.copy()
-#     Tc_diff_DSPM3.data = grid_Tc_DSP.data - T_c_grid.data
-#     tc_min, tc_max = Tc_diff_DSPM3.data.min(), Tc_diff_DSPM3.data.max()
-#     Tc_diff_DSPM3.plot(ax=ax9, cmap=cmap2, colorbar=None, ticks='wSen', ylabel=None, **args_plot)
-#     ax9.set_title('Crustal thickness residual DSP - M4', fontweight="bold")
-        
-#     norm_tc = mcolors.Normalize(vmin=0, vmax=110)
-#     cb5 = fig.colorbar(cm.ScalarMappable(norm=norm_tc, cmap=cmap3), cax=cax_tc_shared, orientation='horizontal')
-#     cb5.set_label('$T_c$ [km]', fontweight="bold")
-
-#     norm_tc_diff = mcolors.Normalize(vmin=tc_min, vmax=tc_max)
-#     cb6 = fig.colorbar(cm.ScalarMappable(norm=norm_tc_diff, cmap=cmap2), cax=cax_tc_diff, orientation='horizontal')
-#     cb6.set_label('$T_c$ [km]', fontweight="bold")
-
-
-#     # --- GLOBAL SUPTITLE AND OUTPUT ---
-#     plt.suptitle(f'Residual checks DSP and M4. lmax={LMAX_REF}, \n'
-#                  f'DSP constant $T_e$={Te_input/1e3} km, '
-#                  + (f'M4 constant $T_e$={Te_input/1e3} km' if strain==0 else '')
-#                  + ('M4 $T_e$=Plesa Strain14 Map' if strain==14 else '')
-#                  + ('M4 $T_e$=Plesa Strain17 Map' if strain==17 else '')
-#                  + f'\nDSP & M4 constant $T_c$={T_c/1e3} km, '
-#                  f'$\\rho_c$ = {rho_c} kg/m$^3$, $\\rho_l$ = {rho_l} kg/m$^3$, $\\rho_m$ = {rho_m} kg/m$^3$',
-#                  y=0.85, fontsize=15)
-                
-#     if SaveFigs:
-#         plt_savetitle = ('Residual_checks_DSP_M3_lmax={LMAX_REF}_'
-#                 + (f'both_constant_Te={Te_input/1e3}km_' if strain==0 else '')
-#                 + ('Te_M3=PlesaStrain14Map_'
-#                    'Te_DSP={Te_input/1e3}km_'  if strain==14 else '')
-#                 + ('Te_M3=PlesaStrain17Map_'
-#                    'Te_DSP={Te_input/1e3}km_'  if strain==17 else '')
-#                 + 'Tc={T_c/1e3}km'
-#                 + '.png')
-#         FigPath = os.path.join(SavePath, plt_savetitle)
-#         plt.savefig(FigPath, dpi=100, bbox_inches='tight')
-#     plt.show()
-#     plt.close()
+    dc_diff_DSPM4 = dc_DSP - dc_clm_zeroed
+    dc_diff_DSPM4 = dc_diff_DSPM4.expand(**args_expand)
+    dc_diff_DSPM4.data = dc_diff_DSPM4.data / 1e3
 
 
 
 
-# %% PLOTS - DSP-M4 RESIDUAL PLOTS BETTER LAYOUT - WITHOUT CRUSTAL THICKNESS
-    
-    args_expand = dict(lmax=grid_expansion, lmax_calc=LMAX_REF)
-    args_plot = dict(tick_interval=[45, 30], grid=True)
 
     # 1. Increase overall figure height to accommodate larger plots and clear spacing
     fig = plt.figure(figsize=(16, 10))
     
     # 2. Outer grid controls the 3 main data rows. 
     # Increase hspace here to add massive spacing BETWEEN your rows.
-    outer_gs = gridspec.GridSpec(2, 1, hspace=-0.15) 
+    if show_Tc:
+        h_space_outer = 0.3
+        h_space_inner1 = 0.3
+        h_space_inner2 = 0.3
+        y_suptitle = 1.03
+        rows=3
+        cb_height = 0.06
+        xticks1 = 'Wsen'
+        xticks2 = 'wsen'
+        xlabel = None
+    else:
+        h_space_outer = -0.15
+        h_space_inner1 = -0.5
+        h_space_inner2 = -0.35
+        y_suptitle = 0.86
+        rows=2
+        cb_height = 0.03
+        xticks1 = 'WSen'
+        xticks2 = 'wSen'
+        xlabel = 'Longitude'
 
+
+    outer_gs = gridspec.GridSpec(rows, 1, hspace=h_space_outer)
 
 
     # --- ROW 1: Radial Displacement w ---
     # inner_gs creates a sub-layout for the 3 plots + colorbars in Row 1
     # height_ratios=[1, 0.05] places a thin colorbar strip tightly underneath
     inner_gs1 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[0], 
-                                                 height_ratios=[1, 0.03], hspace=-0.5, wspace=0.15)
+                                                 height_ratios=[1, cb_height], hspace=h_space_inner1, wspace=0.15)
     ax1 = fig.add_subplot(inner_gs1[0, 0:2])
     ax2 = fig.add_subplot(inner_gs1[0, 2:4])
     ax3 = fig.add_subplot(inner_gs1[0, 4:6])
@@ -3088,10 +3424,7 @@ if __name__ == "__main__":
     
     cmap_limits_w = [w_fine.data.min(), w_fine.data.max()]
     
-    grid_w_DSP = pysh.SHCoeffs.from_array(w_DSP.coeffs / 1e3).expand(**args_expand)
-    w_diff_DSPM3 = grid_w_DSP.copy()
-    w_diff_DSPM3.data = grid_w_DSP.data - w_fine.data
-    w_min, w_max = w_diff_DSPM3.data.min(), w_diff_DSPM3.data.max()
+    w_min, w_max = w_diff_DSPM4.data.min(), w_diff_DSPM4.data.max()
     cmap_limits_w_diff =[-max(abs(w_min), abs(w_max)), max(abs(w_min), abs(w_max))]
 
     grid_w_DSP = pysh.SHCoeffs.from_array(w_DSP.coeffs / 1e3).expand(**args_expand)
@@ -3105,9 +3438,8 @@ if __name__ == "__main__":
                 cmap=cmap3, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
     ax2.set_title('M4 - Radial displacement w', fontweight="bold")
     
-    w_diff_DSPM3 = grid_w_DSP.copy()
-    w_diff_DSPM3.data = grid_w_DSP.data - w_fine.data
-    w_diff_DSPM3.plot(ax=ax3, cmap=cmap2,
+
+    w_diff_DSPM4.plot(ax=ax3, cmap=cmap2,
                       cmap_limits = cmap_limits_w_diff,
                       colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
     ax3.set_title('Radial displacement w residual DSP - M4', fontweight="bold")
@@ -3131,7 +3463,7 @@ if __name__ == "__main__":
     if solve_for == 'dc_lm':
         # --- ROW 2: Crustal Root Variations ---
         inner_gs2 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[1], 
-                                                     height_ratios=[1, 0.03], hspace=-0.35, wspace=0.15)
+                                                     height_ratios=[1, cb_height], hspace=h_space_inner2, wspace=0.15)
         ax4 = fig.add_subplot(inner_gs2[0, 0:2])
         ax5 = fig.add_subplot(inner_gs2[0, 2:4])
         ax6 = fig.add_subplot(inner_gs2[0, 4:6])
@@ -3140,24 +3472,20 @@ if __name__ == "__main__":
         cax_dc_diff   = fig.add_subplot(inner_gs2[1, 4:6])
     
         cmap_limits_dc = [-50, 30]
-        grid_dc_DSP = pysh.SHCoeffs.from_array(dc_DSP.coeffs / 1e3).expand(**args_expand)
-        dc_diff_DSPM3 = grid_dc_DSP.copy()
-        dc_diff_DSPM3.data = grid_dc_DSP.data - dc_grid.data
-        dc_min, dc_max = dc_diff_DSPM3.data.min(), dc_diff_DSPM3.data.max()
+
+        dc_min, dc_max = dc_diff_DSPM4.data.min(), dc_diff_DSPM4.data.max()
         cmap_limits_dc_diff =[-max(abs(dc_min), abs(dc_max)), max(abs(dc_min), abs(dc_max))]
     
         grid_dc_DSP = pysh.SHCoeffs.from_array(dc_DSP.coeffs / 1e3).expand(**args_expand)
-        grid_dc_DSP.plot(ax=ax4, cmap=cmap3, cmap_limits=[-50, 30], colorbar=None, ticks='WSen', **args_plot)
+        grid_dc_DSP.plot(ax=ax4, cmap=cmap3, cmap_limits=[-50, 30], colorbar=None, ticks=xticks1, xlabel=xlabel, **args_plot)
         ax4.set_title('DSP - Crustal root variations', fontweight="bold")
         
-        dc_grid.plot(ax=ax5, cmap=cmap3, cmap_limits=cmap_limits_dc, colorbar=None, ticks='wSen', ylabel=None, **args_plot)
+        dc_grid.plot(ax=ax5, cmap=cmap3, cmap_limits=cmap_limits_dc, colorbar=None, ticks=xticks2, xlabel=xlabel, ylabel=None, **args_plot)
         ax5.set_title('M4 - Crustal root variations', fontweight="bold")
     
-        dc_diff_DSPM3 = grid_dc_DSP.copy()
-        dc_diff_DSPM3.data = grid_dc_DSP.data - dc_grid.data
-        dc_diff_DSPM3.plot(ax=ax6, cmap=cmap2, 
+        dc_diff_DSPM4.plot(ax=ax6, cmap=cmap2, 
                            cmap_limits=cmap_limits_dc_diff, 
-                           colorbar=None, ticks='wSen', ylabel=None, **args_plot)
+                           colorbar=None, ticks=xticks2, xlabel=xlabel, ylabel=None, **args_plot)
         ax6.set_title('Crustal root variations residual DSP - M4', fontweight="bold")
     
         norm_dc = mcolors.Normalize(vmin=cmap_limits_dc[0], vmax=cmap_limits_dc[1])
@@ -3172,7 +3500,7 @@ if __name__ == "__main__":
     if solve_for == 'drho_lm':
         # --- ROW 2: Mantle density Variations ---
         inner_gs2 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[1], 
-                                                     height_ratios=[1, 0.03], hspace=-0.35, wspace=0.15)
+                                                     height_ratios=[1, cb_height], hspace=h_space_inner2, wspace=0.15)
         ax4 = fig.add_subplot(inner_gs2[0, 0:2])
         ax5 = fig.add_subplot(inner_gs2[0, 2:4])
         ax6 = fig.add_subplot(inner_gs2[0, 4:6])
@@ -3182,23 +3510,18 @@ if __name__ == "__main__":
     
         cmap_limits_drho = [-500, 500]
         
-        grid_drho_DSP = pysh.SHCoeffs.from_array(drho_DSP.coeffs).expand(**args_expand)
-        drho_diff_DSPM3 = grid_drho_DSP.copy()
-        drho_diff_DSPM3.data = grid_drho_DSP.data - drho_grid.data
-        drho_min, drho_max = drho_diff_DSPM3.data.min(), drho_diff_DSPM3.data.max()
+        drho_min, drho_max = drho_diff_DSPM4.data.min(), drho_diff_DSPM4.data.max()
         cmap_limits_drho_diff =[-max(abs(drho_min), abs(drho_max)), max(abs(drho_min), abs(drho_max))]
     
-        grid_drho_DSP.plot(ax=ax4, cmap=cmap1, cmap_limits=cmap_limits_drho, colorbar=None, ticks='WSen', **args_plot)
+        grid_drho_DSP.plot(ax=ax4, cmap=cmap1, cmap_limits=cmap_limits_drho, colorbar=None, ticks=xticks1, xlabel=xlabel, **args_plot)
         ax4.set_title('DSP - Mantle density variations', fontweight="bold")
         
-        drho_grid.plot(ax=ax5, cmap=cmap1, cmap_limits=cmap_limits_drho, colorbar=None, ticks='wSen', ylabel=None, **args_plot)
+        drho_grid.plot(ax=ax5, cmap=cmap1, cmap_limits=cmap_limits_drho, colorbar=None, ticks=xticks2, xlabel=xlabel, ylabel=None, **args_plot)
         ax5.set_title('M4 - Mantle density variations', fontweight="bold")
     
-        drho_diff_DSPM3 = grid_drho_DSP.copy()
-        drho_diff_DSPM3.data = grid_drho_DSP.data - drho_grid.data
-        drho_diff_DSPM3.plot(ax=ax6, cmap=cmap2, 
+        drho_diff_DSPM4.plot(ax=ax6, cmap=cmap2, 
                            cmap_limits=cmap_limits_drho_diff, 
-                           colorbar=None, ticks='wSen', ylabel=None, **args_plot)
+                           colorbar=None, ticks=xticks2, xlabel=xlabel, ylabel=None, **args_plot)
         ax6.set_title('Mantle density variations residual DSP - M4', fontweight="bold")
     
         norm_drho = mcolors.Normalize(vmin=cmap_limits_drho[0], vmax=cmap_limits_drho[1])
@@ -3208,6 +3531,38 @@ if __name__ == "__main__":
         norm_drho_diff = mcolors.Normalize(vmin=cmap_limits_drho_diff[0], vmax=cmap_limits_drho_diff[1])
         cb4 = fig.colorbar(cm.ScalarMappable(norm=norm_drho_diff, cmap=cmap2), cax=cax_drho_diff, orientation='horizontal')
         cb4.set_label('$\\delta \\rho$ [kg/m$^3$]', fontweight="bold")
+
+    # --- ROW 3: Crustal Thickness ---
+    if show_Tc:
+        inner_gs3 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[2], 
+                                                     height_ratios=[1, cb_height], hspace=0.3, wspace=0.15)
+        ax7 = fig.add_subplot(inner_gs3[0, 0:2])
+        ax8 = fig.add_subplot(inner_gs3[0, 2:4])
+        ax9 = fig.add_subplot(inner_gs3[0, 4:6])
+        
+        cax_tc_shared = fig.add_subplot(inner_gs3[1, 1:3])
+        cax_tc_diff   = fig.add_subplot(inner_gs3[1, 4:6])
+    
+        Tc_min, Tc_max = Tc_diff_DSPM4.data.min(), Tc_diff_DSPM4.data.max()
+        cmap_limits_Tc_diff =[-max(abs(Tc_min), abs(Tc_max)), max(abs(Tc_min), abs(Tc_max))]
+
+        grid_Tc_DSP.plot(ax=ax7, cmap=cmap3, cmap_limits=[0, 110], colorbar=None, xlabel=None, ticks='WSen', **args_plot)
+        ax7.set_title('DSP - Crustal thickness', fontweight="bold")
+        
+        T_c_grid.plot(ax=ax8, cmap=cmap3, cmap_limits=[0, 110], colorbar=None, ticks='wSen', xlabel=None, ylabel=None, **args_plot)
+        ax8.set_title('M4 - Crustal thickness', fontweight="bold")
+    
+        tc_min, tc_max = Tc_diff_DSPM4.data.min(), Tc_diff_DSPM4.data.max()
+        Tc_diff_DSPM4.plot(ax=ax9, cmap=cmap2, cmap_limits=cmap_limits_Tc_diff, colorbar=None, ticks='wSen', xlabel=None, ylabel=None, **args_plot)
+        ax9.set_title('Crustal thickness residual DSP - M4', fontweight="bold")
+            
+        norm_tc = mcolors.Normalize(vmin=0, vmax=110)
+        cb5 = fig.colorbar(cm.ScalarMappable(norm=norm_tc, cmap=cmap3), cax=cax_tc_shared, orientation='horizontal')
+        cb5.set_label('$T_c$ [km]', fontweight="bold")
+    
+        norm_tc_diff = mcolors.Normalize(vmin=cmap_limits_Tc_diff[0], vmax=cmap_limits_Tc_diff[1])
+        cb6 = fig.colorbar(cm.ScalarMappable(norm=norm_tc_diff, cmap=cmap2), cax=cax_tc_diff, orientation='horizontal')
+        cb6.set_label('$T_c$ [km]', fontweight="bold")
 
 
 
@@ -3224,16 +3579,16 @@ if __name__ == "__main__":
                  + f'\nDSP & M4 constant $T_c$={T_c/1e3} km, '
                  f'$\\rho_c$ = {rho_c} kg/m$^3$, $\\rho_l$ = {rho_l} kg/m$^3$, '
                  f'$\\rho_m$ = {rho_m} kg/m$^3$',
-                 y=0.86, fontsize=15)
+                 y=y_suptitle, fontsize=15)
                 
     if SaveFigs:
-        plt_savetitle = ('Residual_checks_DSP_M3_lmax={LMAX_REF}_'
+        plt_savetitle = (f'Residual_checks_DSP_M4_lmax={LMAX_REF}_'
                 + (f'both_constant_Te={Te_input/1e3}km_' if strain==0 else '')
-                + ('Te_M3=PlesaStrain14Map_'
-                   'Te_DSP={Te_input/1e3}km_'  if strain==14 else '')
-                + ('Te_M3=PlesaStrain17Map_'
-                   'Te_DSP={Te_input/1e3}km_'  if strain==17 else '')
-                + 'Tc={T_c/1e3}km'
+                + ('Te_M4=PlesaStrain14Map_'
+                   f'Te_DSP={Te_input/1e3}km_'  if strain==14 else '')
+                + ('Te_M4=PlesaStrain17Map_'
+                   f'Te_DSP={Te_input/1e3}km_'  if strain==17 else '')
+                + f'Tc={T_c/1e3}km'
                 + '.png')
         FigPath = os.path.join(SavePath, plt_savetitle)
         plt.savefig(FigPath, dpi=100, bbox_inches='tight')
@@ -3241,63 +3596,103 @@ if __name__ == "__main__":
     plt.close()
 
     
-    
 # %% PLOTS - w-POWER SPECTRA COMPARISONS BETWEEN DSP AND M4
     
-    # fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10,9))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10,9))
 
-    # solutions_w[lmax_run, rotation].plot_spectrum(ax=ax1, show=False, 
-    #                 legend=('M4 coeffs'), plot_dict={'linestyle': linestyle})
-    # w_coeffs_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_w_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
-    # w_coeffs_DSP.coeffs[0,0,0] = 0
-    # w_coeffs_DSP.plot_spectrum(ax=ax1, show=False, 
-    #                 legend=('DSP coeffs'), plot_dict={'linestyle': '--'})
+    solutions_w[lmax_run, rotation].plot_spectrum(ax=ax1, show=False, 
+                    legend=('M4 coeffs'))
+    w_coeffs_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_w_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    w_coeffs_DSP.coeffs[0,0,0] = 0
+    w_coeffs_DSP.plot_spectrum(ax=ax1, show=False, 
+                    legend=('DSP coeffs'), plot_dict={'linestyle': '--'})
+    ax1.set_title('M4 & DSP w-coeffs')
 
-    # w_spectrum_diff = solutions_w[lmax_run, rotation].spectrum() - w_coeffs_DSP.spectrum()    
-    # l = np.arange(0,(LMAX_REF+1))
-    # ax2.plot(l, w_spectrum_diff, 
-    #          label=('M4 - DSP'), 
-    #          linestyle=linestyle)
-    # plt.tight_layout()
-    # plt.grid()
-    # # ax1.set_ylim(1e-5)
-    # ax2.set_xlim(0,44)
-    # plt.show()
+    w_spectrum_diff = (w_coeffs_DSP- solutions_w[LMAX_REF, 0]).spectrum() 
+    l = np.arange(0,(LMAX_REF+1))
+    ax2.plot(l, w_spectrum_diff, 
+             label=('M4 - DSP'))
+    ax2.set_title('|DSP-w| residual')
+    plt.tight_layout()
+    plt.grid()
+    ax1.set_ylim(1e-2)
+    ax2.set_xlim(0,44)
+    if SaveFigs:
+        plt_savetitle = (f'Comparison_w_DSP_M4_lmax={LMAX_REF}_'
+                + (f'both_constant_Te={Te_input/1e3}km_' if strain==0 else '')
+                + ('Te_M4=PlesaStrain14Map_'
+                   f'Te_DSP={Te_input/1e3}km_'  if strain==14 else '')
+                + ('Te_M4=PlesaStrain17Map_'
+                   f'Te_DSP={Te_input/1e3}km_'  if strain==17 else '')
+                + f'Tc={T_c/1e3}km'
+                + '.png')
+        FigPath = os.path.join(SavePath, plt_savetitle)
+        plt.savefig(FigPath, dpi=100, bbox_inches='tight')
+    plt.show()
     
+    
+# %% PLOTS - w-POWER SPECTRA 2D COMPARISONS BETWEEN DSP AND M4
+        
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(7,9))
+
+    solutions_w[LMAX_REF, 0].plot_spectrum2d(ax=ax1, show=False, cmap_limits=[1e-6,1e6])
+    ax1.set_title('M4 w-coeffs')
+    
+    w_coeffs_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_w_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    w_coeffs_DSP.coeffs[0,0,0] = 0
+    w_coeffs_DSP.plot_spectrum2d(ax=ax2, show=False, cmap_limits=[1e-6,1e6])
+    ax2.set_title('DSP w-coeffs')
+
+    w_diff = w_coeffs_DSP - solutions_w[LMAX_REF, 0]
+    w_diff.plot_spectrum2d(ax=ax3, show=False )
+    ax3.set_title('DSP-w residual')
+    
+    plt.tight_layout()
+    plt.grid()
+    plt.show()
 
     
 # %% PLOTS - STRESS AND STRAIN FIELDS
 
-    lmax_stress_strain = 3*LMAX_REF
 
-    w_clm = solutions_w[LMAX_REF, 0].expand(lmax=lmax_stress_strain).expand()
-    F_clm = solutions_F[LMAX_REF, 0].expand(lmax=lmax_stress_strain).expand()
+    w_clm = solutions_w[LMAX_REF, 0].expand(lmax=grid_expansion_res).expand()
+    F_clm = solutions_F[LMAX_REF, 0].expand(lmax=grid_expansion_res).expand()
+    q_clm = solutions_q[LMAX_REF, 0].expand(lmax=grid_expansion_res).expand()
 
     # compute_Omega now returns Beuthe's Omega = Re*omega (required by
     # cons_disp_S)
-    Omega_coeffs = compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, g0, R, T_e_0, lmax_stress_strain)
-    Omega_grid = Omega_coeffs.expand(lmax=lmax_stress_strain)
+    Omega_coeffs = compute_Omega(w_clm, T_e_parent, topo_clm, geoid_clm, q_clm, g0=g0, R=R, T_e_0=T_e_0, lmax_calc=LMAX_REF, lmax_grid=grid_expansion_res)
+    Omega_grid = Omega_coeffs.expand(lmax=grid_expansion_res)
 
     # S first (needed by the DSP-convention stress_fields), then stresses
-    S_clm = cons_disp_S(w_clm, F_clm, Omega_grid, T_e_parent, a_clm, R, T_e_0, lmax_stress_strain)
+    S_clm = cons_disp_S(w_clm, F_clm, Omega_coeffs, T_e_parent, a_clm, R=R, T_e_0=T_e_0, lmax_calc=LMAX_REF, lmax_grid=grid_expansion_res)
     S_clm.coeffs[0,0,0] = 0
     w_clm.coeffs[0,0,0] = 0
-    sigma_tt, sigma_pp, sigma_tp = stress_fields(S_clm, w_clm, T_e_parent, lmax_stress_strain, R, T_e_0)
-    eps_tt, eps_pp, eps_tp = strain_fields(S_clm, w_clm, T_e_parent, lmax_stress_strain, R, T_e_0)
+    
+    # TEST TO ALIGN DSP AND M4:
+    # There is a difference between DSP A_lm and M4 S_lm in degree 1 terms only.
+    # Caused by laplacian difference in Beuthe formulation between constant and
+    # variable Te (is hypothesis now). For now compare two by setting degree-1
+    # terms to zero in both.
+    # S_clm.coeffs[:,1,:] = 0    
+    
+    
+    sigma_tt, sigma_pp, sigma_tp = stress_fields(S_clm, w_clm, T_e_parent, lmax=grid_expansion_res, R=R, T_e_0=T_e_0)
+    eps_tt, eps_pp, eps_tp = strain_fields(S_clm, w_clm, T_e_parent, lmax=grid_expansion_res, R=R, T_e_0=T_e_0)
 
     eps_tt.data = eps_tt.data*1e3; eps_pp.data = eps_pp.data*1e3; eps_tp.data = eps_tp.data*1e3
-    sigma_tt.data = sigma_tt.data*1e3; sigma_pp.data = sigma_pp.data*1e3; sigma_tp.data = sigma_tp.data*1e3
+    sigma_tt.data = sigma_tt.data*1e3/1e5; sigma_pp.data = sigma_pp.data*1e3/1e5; sigma_tp.data = sigma_tp.data*1e3/1e5
 
     fig, ((ax1, ax4), 
           (ax2, ax5),
           (ax3, ax6)) = plt.subplots(3, 2, figsize=(12,11), dpi=100)
-    sigma_tt.plot(ax=ax1, cmap=cmap1, tick_interval=[45, 30], colorbar = 'bottom', cb_label='Stress field $\\sigma_{\\theta \\theta}$')
-    sigma_pp.plot(ax=ax2, cmap=cmap1, tick_interval=[45, 30], colorbar = 'bottom', cb_label='Stress field $\\sigma_{\\phi \\phi}$')
-    sigma_tp.plot(ax=ax3, cmap=cmap1, tick_interval=[45, 30], colorbar = 'bottom', cb_label='Stress field $\\sigma_{\\theta \\phi}$')
+    sigma_tt.plot(ax=ax1, cmap=cmap1, cmap_limits=[-2.0, 2.0], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Stress field $\\sigma_{\\theta \\theta} \ (\\times 10^{5}$)')
+    sigma_pp.plot(ax=ax2, cmap=cmap1, cmap_limits=[-2.0, 2.0],  tick_interval=[45, 30], colorbar = 'bottom', cb_label='Stress field $\\sigma_{\\phi \\phi} \ (\\times 10^{5})$')
+    sigma_tp.plot(ax=ax3, cmap=cmap1, cmap_limits=[-0.2, 0.2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Stress field $\\sigma_{\\theta \\phi} \ (\\times 10^{5})$')
     
-    eps_tt.plot(  ax=ax4, cmap=cmap1, cmap_limits=[-2, 2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Strain field $\\hat \\epsilon_{\\theta \\theta}$ (x$10^{-3}$)')
-    eps_pp.plot(  ax=ax5, cmap=cmap1, cmap_limits=[-2, 2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Strain field $\\hat \\epsilon_{\\phi \\phi}$ (x$10^{-3}$)')
-    eps_tp.plot(  ax=ax6, cmap=cmap1, cmap_limits=[-2, 2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Strain field $\\hat \\epsilon{\\theta \\phi}$ (x$10^{-3}$)')
+    eps_tt.plot(  ax=ax4, cmap=cmap1, cmap_limits=[-2, 2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Strain field $\\hat \\epsilon_{\\theta \\theta} \ (\\times 10^{-3}$)')
+    eps_pp.plot(  ax=ax5, cmap=cmap1, cmap_limits=[-2, 2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Strain field $\\hat \\epsilon_{\\phi \\phi} \ (\\times 10^{-3}$)')
+    eps_tp.plot(  ax=ax6, cmap=cmap1, cmap_limits=[-2, 2], tick_interval=[45, 30], colorbar = 'bottom', cb_label='Strain field $\\hat \\epsilon{\\theta \\phi} \ (\\times 10^{-3}$)')
 
     plt.suptitle('M4 - Stress & strain fields')
     plt.tight_layout()
@@ -3318,7 +3713,7 @@ if __name__ == "__main__":
         tick_interval=[45, 30],
         colorbar="bottom",
         cmap=cmc.vik,
-        grid=True,
+        # grid=True,
         # cb_tick_interval=1,
     )
     fig, ((ax1, ax2), 
@@ -3330,15 +3725,15 @@ if __name__ == "__main__":
         ticks="WSne",
         cb_label="Minimum principal horizontal strain ($\\times 10^{-3}$)",
         cmap_limits=[-4, 4],
-        xlabel=None,
+        # xlabel=None,
         **args_plot,
     )
     pysh.SHGrid.from_array(max_strain * 1e3).plot(
         ax=ax2,
         cb_label="Maximum principal horizontal strain ($\\times 10^{-3}$)",
-        ticks="WSne",
+        ticks="wSnE",
         cmap_limits=[-4, 4],
-        xlabel=None,
+        ylabel=None,
         **args_plot,
     )
     pysh.SHGrid.from_array(sum_strain * 1e3).plot(
@@ -3346,14 +3741,15 @@ if __name__ == "__main__":
         cb_label="Sum of principal horizontal strains ($\\times 10^{-3}$)",
         cmap_limits=[-3, 3],
         ticks="WSne",
-        xlabel=None,
+        # xlabel=None,
         **args_plot,
     )
     pysh.SHGrid.from_array(principal_angle_strain).plot(
         ax=ax4,
-        cb_label="Principal strain angle (°)",
-        ticks="WSne",
+        cb_label="Principal angle (°)",
+        ticks="wSnE",
         cmap_limits=[-90, 90],
+        ylabel=None,
         tick_interval=[45, 30],
         colorbar="bottom",
         cmap=cmc.vikO,
@@ -3378,45 +3774,29 @@ if __name__ == "__main__":
         angles=principal_angle_strain[skip],
         color="g",
     )
-    plt.suptitle('M4 - Principal strains', y=1.0)
-    plt.tight_layout()
+    plt.suptitle('M4 - Principal strains', y=0.9)
+    # plt.tight_layout()
     plt.show()
     
     
     
-    
-    
-    
-    
-## %% PLOT RESIDUAL STRAINS AND ANGLES BETWEEN DSP AND M4
-    
-    # sigma_tt, sigma_pp, sigma_tp = stress_fields(S_clm, w_clm, T_e_parent, lmax_stress_strain, R, T_e_0)
-    # eps_tt, eps_pp, eps_tp = strain_fields(S_clm, w_clm, T_e_parent, lmax_stress_strain, R, T_e_0)
+    ## %% PLOT RESIDUAL STRAINS AND ANGLES BETWEEN DSP AND M4
+    sum_strain_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_sum_strain_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    princ_angle_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_principal_angle_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    # stress_theta_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_stress_theta_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    # stress_phi_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_stress_phi_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    # stress_thetaphi_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_stress_theta_phi_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    tot_thetaphi_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_strain_theta_phi_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
 
-    # eps_tt.data = eps_tt.data*1e3; eps_pp.data = eps_pp.data*1e3; eps_tp.data = eps_tp.data*1e3
-    # sigma_tt.data = sigma_tt.data*1e3; sigma_pp.data = sigma_pp.data*1e3; sigma_tp.data = sigma_tp.data*1e3
-    
-    # (   min_strain,
-    #     max_strain,
-    #     sum_strain,
-    #     principal_angle_strain,
-    # ) = Principal_strainstress_angle(-eps_tt.data, -eps_pp.data, -eps_tp.data)
-    
-    sum_strain_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_sumstrain_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
-    princ_angle_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_princ_angle_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
-    # stress_theta_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_stress_theta_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
-    # stress_phi_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_stress_phi_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
-    # stress_thetaphi_DSP = pysh.SHGrid.from_file(f'DSP_result_files/DSP_stress_thetaphi_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
 
     sum_strain = pysh.SHGrid.from_array(sum_strain * 1e3)
     sum_strain_residual = sum_strain_DSP.data - sum_strain.data
+    
     princ_angle_residual = princ_angle_DSP.data - pysh.SHGrid.from_array(principal_angle_strain).data
-    # stress_theta_residual = stress_theta_DSP.data - sigma_tt.data
-    # stress_phi_residual = stress_phi_DSP.data - sigma_pp.data
-    # stress_thetaphi_residual = stress_thetaphi_DSP.data - sigma_tp.data
+    princ_angle_residual = ((princ_angle_residual + 90) % 180) - 90
     
     
-    args_expand = dict(lmax=grid_expansion, lmax_calc=LMAX_REF)
+    args_expand = dict(lmax=grid_expansion_res, lmax_calc=LMAX_REF)
     args_plot = dict(tick_interval=[45, 30], grid=True)
 
     # 1. Increase overall figure height to accommodate larger plots and clear spacing
@@ -3425,6 +3805,14 @@ if __name__ == "__main__":
     # 2. Outer grid controls the 3 main data rows. 
     # Increase hspace here to add massive spacing BETWEEN your rows.
     outer_gs = gridspec.GridSpec(2, 1, hspace=-0.15) 
+
+
+
+    # compare thetaphi strains to check definition residuals
+    tot_thetaphi_M4 = (eps_tp * 1e3)
+    tot_thetaphi_residual = tot_thetaphi_DSP.data - tot_thetaphi_M4.data
+
+
 
 
 
@@ -3445,7 +3833,8 @@ if __name__ == "__main__":
     cmap_limits_strain = [-3,3]
     strain_min, strain_max = sum_strain_residual.min(), sum_strain_residual.max()
     cmap_limits_strain_diff =[-max(abs(strain_min), abs(strain_max)), max(abs(strain_min), abs(strain_max))]
-
+    # cmap_limits_strain_diff =[(strain_min), (strain_max)]
+    
     # grid_w_DSP = pysh.SHCoeffs.from_array(w_DSP.coeffs / 1e3).expand(**args_expand)
     sum_strain_DSP.plot(ax=ax1, 
                     cmap_limits=cmap_limits_strain, 
@@ -3466,13 +3855,67 @@ if __name__ == "__main__":
     cb1 = fig.colorbar(cm.ScalarMappable(
                     norm=norm_strain, 
                     cmap=cmap1), 
-                       cax=cax_strain_shared, orientation='horizontal')
+                        cax=cax_strain_shared, orientation='horizontal')
     cb1.set_label('Principal strain $\\epsilon$ ($\\times 10^{-3}$)', fontweight="bold")
 
 
     norm_strain_diff = mcolors.Normalize(vmin=cmap_limits_strain_diff[0], vmax=cmap_limits_strain_diff[1])
-    cb2 = fig.colorbar(cm.ScalarMappable(norm=norm_strain_diff, cmap=cmap2), cax=cax_strain_diff, orientation='horizontal')
+    cb2 = fig.colorbar(cm.ScalarMappable(
+                    norm=norm_strain_diff, 
+                    cmap=cmap2), 
+                        cax=cax_strain_diff, orientation='horizontal')
     cb2.set_label('Principal strain $\\epsilon$ ($\\times 10^{-3}$)', fontweight="bold")
+
+
+    # # --- ROW 1: strain theta phi ---
+    # # inner_gs creates a sub-layout for the 3 plots + colorbars in Row 1
+    # # height_ratios=[1, 0.05] places a thin colorbar strip tightly underneath
+    # inner_gs1 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[0], 
+    #                                              height_ratios=[1, 0.03], hspace=-0.5, wspace=0.15)
+    # ax1 = fig.add_subplot(inner_gs1[0, 0:2])
+    # ax2 = fig.add_subplot(inner_gs1[0, 2:4])
+    # ax3 = fig.add_subplot(inner_gs1[0, 4:6])
+    
+    # # Shared colorbar spans underneath columns 0 and 1
+    # cax_strain_shared = fig.add_subplot(inner_gs1[1, 1:3])
+    # # Residual colorbar spans exactly underneath column 2 (Perfect 1:1 width match)
+    # cax_strain_diff   = fig.add_subplot(inner_gs1[1, 4:6])
+    
+    # cmap_limits_strain = [-1,1]
+    # strain_min, strain_max = tot_thetaphi_residual.min(), tot_thetaphi_residual.max()
+    # cmap_limits_strain_diff =[-max(abs(strain_min), abs(strain_max)), max(abs(strain_min), abs(strain_max))]
+    # # cmap_limits_strain_diff =[(strain_min), (strain_max)]
+    
+    # # grid_w_DSP = pysh.SHCoeffs.from_array(w_DSP.coeffs / 1e3).expand(**args_expand)
+    # tot_thetaphi_DSP.plot(ax=ax1, 
+    #                 cmap_limits=cmap_limits_strain, 
+    #                 cmap=cmap1, colorbar=None, ticks='Wsen', xlabel=None, **args_plot)
+    # ax1.set_title('DSP - tot strain thetaphi', fontweight="bold")
+    
+    # tot_thetaphi_M4.plot(ax=ax2, 
+    #             cmap_limits=cmap_limits_strain, 
+    #             cmap=cmap1, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
+    # ax2.set_title('M4 - tot strain thetaphi', fontweight="bold")
+    
+    # pysh.SHGrid.from_array(tot_thetaphi_residual).plot(ax=ax3, cmap=cmap2, 
+    #                                                  cmap_limits=cmap_limits_strain_diff,
+    #                                                  colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
+    # ax3.set_title('tot strain thetaphi residual DSP - M4', fontweight="bold")
+
+    # norm_strain = mcolors.Normalize(vmin=cmap_limits_strain[0], vmax=cmap_limits_strain[1])
+    # cb1 = fig.colorbar(cm.ScalarMappable(
+    #                 norm=norm_strain, 
+    #                 cmap=cmap1), 
+    #                     cax=cax_strain_shared, orientation='horizontal')
+    # cb1.set_label('Principal strain $\\epsilon$ ($\\times 10^{-3}$)', fontweight="bold")
+
+
+    # norm_strain_diff = mcolors.Normalize(vmin=cmap_limits_strain_diff[0], vmax=cmap_limits_strain_diff[1])
+    # cb2 = fig.colorbar(cm.ScalarMappable(
+    #                 norm=norm_strain_diff, 
+    #                 cmap=cmap2), 
+    #                     cax=cax_strain_diff, orientation='horizontal')
+    # cb2.set_label('Principal strain $\\epsilon$ ($\\times 10^{-3}$)', fontweight="bold")
 
 
 
@@ -3488,6 +3931,8 @@ if __name__ == "__main__":
     cax_angle_diff   = fig.add_subplot(inner_gs2[1, 4:6])
     
     cmap_limits_angle = [-90,90]
+    angle_min, angle_max = princ_angle_residual.min(), princ_angle_residual.max()
+    cmap_limits_angle_diff =[-max(abs(angle_min), abs(angle_max)), max(abs(angle_min), abs(angle_max))]
 
     princ_angle_DSP.plot(ax=ax4, cmap=cmap1, cmap_limits=cmap_limits_angle, colorbar=None, ticks='WSen', **args_plot)
     ax4.set_title('DSP - Principal angle', fontweight="bold")
@@ -3497,14 +3942,14 @@ if __name__ == "__main__":
 
 
     angle_min, angle_max = princ_angle_residual.min(), princ_angle_residual.max()
-    pysh.SHGrid.from_array(princ_angle_residual).plot(ax=ax6, cmap=cmap2, cmap_limits=cmap_limits_angle, colorbar=None, ticks='wSen', ylabel=None, **args_plot)
+    pysh.SHGrid.from_array(princ_angle_residual).plot(ax=ax6, cmap=cmap2, cmap_limits=cmap_limits_angle_diff, colorbar=None, ticks='wSen', ylabel=None, **args_plot)
     ax6.set_title('Principal angle residual DSP - M4', fontweight="bold")
 
     norm_angle = mcolors.Normalize(vmin=cmap_limits_angle[0], vmax=cmap_limits_angle[1])
     cb3 = fig.colorbar(cm.ScalarMappable(norm=norm_angle, cmap=cmap1), cax=cax_angle_shared, orientation='horizontal')
     cb3.set_label('Principal angle [°]', fontweight="bold")
 
-    norm_angle_diff = mcolors.Normalize(vmin=cmap_limits_angle[0], vmax=cmap_limits_angle[1])
+    norm_angle_diff = mcolors.Normalize(vmin=cmap_limits_angle_diff[0], vmax=cmap_limits_angle_diff[1])
     cb4 = fig.colorbar(cm.ScalarMappable(norm=norm_angle_diff, cmap=cmap2), cax=cax_angle_diff, orientation='horizontal')
     cb4.set_label('Principal angle [°]', fontweight="bold")
 
@@ -3552,22 +3997,25 @@ if __name__ == "__main__":
 
 
     # --- GLOBAL SUPTITLE AND OUTPUT ---
-    plt.suptitle(f'Residual strains DSP and M4. lmax={LMAX_REF}, \n'
-                 f'DSP constant $T_e$={Te_input/1e3} km, '
+    plt.suptitle('Residual strains DSP and M4\n'
+                 + ('Solving for $\\delta \\rho_{lm}$, $\\delta c_{lm}$=0' if solve_for == 'drho_lm' else '')
+                 + ('Solving for $\\delta c_{lm}$, $\\delta \\rho_{lm}$=0' if solve_for == 'dc_lm' else '')
+                 + f' --- lmax={LMAX_REF}'
+                 + f'\nDSP constant $T_e$={Te_input/1e3} km, '
                  + (f'M4 constant $T_e$={Te_input/1e3} km' if strain==0 else '')
                  + ('M4 $T_e$=Plesa Strain14 Map' if strain==14 else '')
                  + ('M4 $T_e$=Plesa Strain17 Map' if strain==17 else '')
                  + f'\nDSP & M4 constant $T_c$={T_c/1e3} km, '
                  f'$\\rho_c$ = {rho_c} kg/m$^3$, $\\rho_l$ = {rho_l} kg/m$^3$, '
                  f'$\\rho_m$ = {rho_m} kg/m$^3$',
-                 y=0.83, fontsize=15)
+                 y=0.86, fontsize=15)
                 
     if SaveFigs:
-        plt_savetitle = ('Residual_strains_DSP_M3_lmax={LMAX_REF}_'
+        plt_savetitle = ('Residual_strains_DSP_M4_lmax={LMAX_REF}_'
                 + (f'both_constant_Te={Te_input/1e3}km_' if strain==0 else '')
-                + ('Te_M3=PlesaStrain14Map_'
+                + ('Te_M4=PlesaStrain14Map_'
                    'Te_DSP={Te_input/1e3}km_'  if strain==14 else '')
-                + ('Te_M3=PlesaStrain17Map_'
+                + ('Te_M4=PlesaStrain17Map_'
                    'Te_DSP={Te_input/1e3}km_'  if strain==17 else '')
                 + 'Tc={T_c/1e3}km'
                 + '.png')
@@ -3576,13 +4024,222 @@ if __name__ == "__main__":
     plt.show()
     plt.close()
 
+# %% DSP A_lm vs M4 S_lm
         
+
+    Omega_lm_M4 = compute_Omega(solutions_w[LMAX_REF,0], T_e_parent, topo_clm, geoid_clm, solutions_q[LMAX_REF,0], g0, R=R, T_e_0=T_e_0, lmax_calc=LMAX_REF, lmax_grid=grid_expansion_res)
+    Omega_lm_M4_DSPconv = Omega_lm_M4.copy()
+    Omega_lm_M4_DSPconv.coeffs = Omega_lm_M4_DSPconv.coeffs/(R-T_e_0/2)
+    Omega_grid_M4 = pysh.SHCoeffs.from_array(Omega_lm_M4_DSPconv.coeffs).expand(**args_expand)
+
+
+    Omega_lm_DSP = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_omega_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    Omega_grid_DSP = pysh.SHCoeffs.from_array(Omega_lm_DSP.coeffs).expand(**args_expand)
+
+    Omega_diff_DSPM4 = Omega_grid_DSP.copy()
+    Omega_diff_DSPM4.data = Omega_grid_DSP.data - Omega_grid_M4.data
+
+
+    S_lm = cons_disp_S(solutions_w[LMAX_REF,0], solutions_F[LMAX_REF,0], Omega_lm_M4, T_e_parent, a_clm, R=R, T_e_0=T_e_0, lmax_calc=LMAX_REF, lmax_grid=grid_expansion_res)
+    A_lm = pysh.SHCoeffs.from_file(f'DSP_result_files/DSP_SolveFor{solve_for}_A_lmax={LMAX_REF}_Tc={T_c}_Te={Te_input}_rhol={rho_l}_rhoc={rho_c}_rhom={rho_m}')
+    
+    
+    S_grid = pysh.SHGrid.from_array(S_lm.expand(**args_expand).data/1e3)
+    A_grid = pysh.SHCoeffs.from_array(A_lm.coeffs / 1e3).expand(**args_expand)
+
+    A_S_diff_DSPM4 = A_grid.copy()
+    A_S_diff_DSPM4.data = A_grid.data - S_grid.data
+
+
+    # 1. Increase overall figure height to accommodate larger plots and clear spacing
+    fig = plt.figure(figsize=(16, 10))
+    
+    # 2. Outer grid controls the 3 main data rows. 
+    # Increase hspace here to add massive spacing BETWEEN your rows.
+    outer_gs = gridspec.GridSpec(2, 1, hspace=-0.15) 
+
+
+    # --- ROW 1: Consoidal load potential Omega ---
+    # inner_gs creates a sub-layout for the 3 plots + colorbars in Row 1
+    # height_ratios=[1, 0.05] places a thin colorbar strip tightly underneath
+    inner_gs1 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[0], 
+                                                 height_ratios=[1, 0.03], hspace=-0.5, wspace=0.15)
+    ax1 = fig.add_subplot(inner_gs1[0, 0:2])
+    ax2 = fig.add_subplot(inner_gs1[0, 2:4])
+    ax3 = fig.add_subplot(inner_gs1[0, 4:6])
+    
+    # Shared colorbar spans underneath columns 0 and 1
+    cax_Omega_shared = fig.add_subplot(inner_gs1[1, 1:3])
+    # Residual colorbar spans exactly underneath column 2 (Perfect 1:1 width match)
+    cax_Omega_diff   = fig.add_subplot(inner_gs1[1, 4:6])
+    
+    cmap_limits_Omega = [Omega_grid_M4.data.min(), Omega_grid_M4.data.max()]
+    
+    Omega_min, Omega_max = Omega_diff_DSPM4.data.min(), Omega_diff_DSPM4.data.max()
+    cmap_limits_Omega_diff =[-max(abs(Omega_min), abs(Omega_max)), max(abs(Omega_min), abs(Omega_max))]
+
+    Omega_grid_DSP.plot(ax=ax1, 
+                    cmap_limits=cmap_limits_Omega, 
+                    cmap=cmap3, colorbar=None, ticks='Wsen', xlabel=None, **args_plot)
+    ax1.set_title('DSP - Consoidal load potential Omega_lm', fontweight="bold")
+    
+    Omega_grid_M4.plot(ax=ax2, 
+                cmap_limits=cmap_limits_Omega, 
+                cmap=cmap3, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
+    ax2.set_title('M4 - Consoidal load potential Omega_lm', fontweight="bold")
+    
+
+    Omega_diff_DSPM4.plot(ax=ax3, cmap=cmap2,
+                      cmap_limits = cmap_limits_Omega_diff,
+                      colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
+    ax3.set_title('Consoidal load potential residual Omega DSP - M4', fontweight="bold")
+
+    norm_Omega = mcolors.Normalize(vmin=cmap_limits_Omega[0], vmax=cmap_limits_Omega[1])
+    cb1 = fig.colorbar(cm.ScalarMappable(
+                    norm=norm_Omega, 
+                    cmap=cmap3), 
+                       cax=cax_Omega_shared, orientation='horizontal')
+    cb1.set_label('$\\Omega$ [N/km]', fontweight="bold")
+   
+    norm_Omega_diff = mcolors.Normalize(vmin=cmap_limits_Omega_diff[0], vmax=cmap_limits_Omega_diff[1])
+    cb2 = fig.colorbar(cm.ScalarMappable(norm=norm_Omega_diff, cmap=cmap2), 
+                       cax=cax_Omega_diff, orientation='horizontal')
+    cb2.set_label('$\\Omega$ [N/km]', fontweight="bold")
+
+    ax1.contour(Omega_grid_DSP.data>0, levels=[0.99], extent=(0,360,-90,90), colors='k', origin='upper')
+    ax2.contour(Omega_grid_M4.data>0, levels=[0.99], extent=(0,360,-90,90), colors='k', origin='upper')
+
+
+
+    # --- ROW 2: Tangential displacement A and S ---
+    # inner_gs creates a sub-layout for the 3 plots + colorbars in Row 1
+    inner_gs1 = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=outer_gs[1], 
+                                                 height_ratios=[1, 0.03], hspace=-0.5, wspace=0.15)
+    ax4 = fig.add_subplot(inner_gs1[0, 0:2])
+    ax5 = fig.add_subplot(inner_gs1[0, 2:4])
+    ax6 = fig.add_subplot(inner_gs1[0, 4:6])
+    
+    # Shared colorbar spans underneath columns 0 and 1
+    cax_A_S_shared = fig.add_subplot(inner_gs1[1, 1:3])
+    # Residual colorbar spans exactly underneath column 2 (Perfect 1:1 width match)
+    cax_A_S_diff   = fig.add_subplot(inner_gs1[1, 4:6])
+    
+    cmap_limits_S = [S_grid.data.min(), S_grid.data.max()]
+    
+    A_S_min, A_S_max = A_S_diff_DSPM4.data.min(), A_S_diff_DSPM4.data.max()
+    cmap_limits_A_S_diff =[-max(abs(A_S_min), abs(A_S_max)), max(abs(A_S_min), abs(A_S_max))]
+
+    A_grid.plot(ax=ax4, 
+                    cmap_limits=cmap_limits_S, 
+                    cmap=cmap3, colorbar=None, ticks='Wsen', xlabel=None, **args_plot)
+    ax4.set_title('DSP - Consoidal displacement A_lm', fontweight="bold")
+    
+    S_grid.plot(ax=ax5, 
+                cmap_limits=cmap_limits_S, 
+                cmap=cmap3, colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
+    ax5.set_title('M4 - Consoidal displacement S_lm', fontweight="bold")
+    
+
+    A_S_diff_DSPM4.plot(ax=ax6, cmap=cmap2,
+                      cmap_limits = cmap_limits_A_S_diff,
+                      colorbar=None, ticks='wsen', xlabel=None, ylabel=None, **args_plot)
+    ax6.set_title('Consoidal displacement residual A-S DSP - M4', fontweight="bold")
+
+    norm_A_S = mcolors.Normalize(vmin=cmap_limits_S[0], vmax=cmap_limits_S[1])
+    cb1 = fig.colorbar(cm.ScalarMappable(
+                    norm=norm_A_S, 
+                    cmap=cmap3), 
+                       cax=cax_A_S_shared, orientation='horizontal')
+    cb1.set_label('A & S [km]', fontweight="bold")
+   
+    norm_A_S_diff = mcolors.Normalize(vmin=cmap_limits_A_S_diff[0], vmax=cmap_limits_A_S_diff[1])
+    cb2 = fig.colorbar(cm.ScalarMappable(norm=norm_A_S_diff, cmap=cmap2), 
+                       cax=cax_A_S_diff, orientation='horizontal')
+    cb2.set_label('A & S [km]', fontweight="bold")
+
+    ax4.contour(A_grid.data>0, levels=[0.99], extent=(0,360,-90,90), colors='k', origin='upper')
+    ax5.contour(S_grid.data>0, levels=[0.99], extent=(0,360,-90,90), colors='k', origin='upper')
+
+
+
+
+    # --- GLOBAL SUPTITLE AND OUTPUT ---
+    plt.suptitle('Residual A_lm DSP and S_lm M4\n'
+                 + ('Solving for $\\delta \\rho_{lm}$, $\\delta c_{lm}$=0' if solve_for == 'drho_lm' else '')
+                 + ('Solving for $\\delta c_{lm}$, $\\delta \\rho_{lm}$=0' if solve_for == 'dc_lm' else '')
+                 + f' --- lmax={LMAX_REF}'
+                 + f'\nDSP constant $T_e$={Te_input/1e3} km, '
+                 + (f'M4 constant $T_e$={Te_input/1e3} km' if strain==0 else '')
+                 + ('M4 $T_e$=Plesa Strain14 Map' if strain==14 else '')
+                 + ('M4 $T_e$=Plesa Strain17 Map' if strain==17 else '')
+                 + f'\nDSP & M4 constant $T_c$={T_c/1e3} km, '
+                 f'$\\rho_c$ = {rho_c} kg/m$^3$, $\\rho_l$ = {rho_l} kg/m$^3$, '
+                 f'$\\rho_m$ = {rho_m} kg/m$^3$',
+                 y=0.86, fontsize=15)
+                
+    if SaveFigs:
+        plt_savetitle = ('Residual_checks_DSP_M4_lmax={LMAX_REF}_'
+                + (f'both_constant_Te={Te_input/1e3}km_' if strain==0 else '')
+                + ('Te_M4=PlesaStrain14Map_'
+                   'Te_DSP={Te_input/1e3}km_'  if strain==14 else '')
+                + ('Te_M4=PlesaStrain17Map_'
+                   'Te_DSP={Te_input/1e3}km_'  if strain==17 else '')
+                + 'Tc={T_c/1e3}km'
+                + '.png')
+        FigPath = os.path.join(SavePath, plt_savetitle)
+        plt.savefig(FigPath, dpi=100, bbox_inches='tight')
+    plt.show()
+    plt.close()
+
+
+# %% PLOTS - RESIDUALS OMEGA AND A/S DSP-M4
+
+    xlim = LMAX_REF-1
+
+    fig, ((ax1, ax2), 
+          (ax3, ax4)) = plt.subplots(2, 2, figsize=(10,9))
+
+    Omega_lm_M4_DSPconv.plot_spectrum(ax=ax1, show=False, 
+                    legend=('M4 Omega coeffs'))
+    Omega_lm_DSP.plot_spectrum(ax=ax1, show=False, 
+                    legend=('DSP Omega coeffs'), plot_dict={'linestyle': '--'})
+    ax1.set_title('M4 & DSP Omega-coeffs')
+    ax1.set_xlim(0,xlim)    
+    ax1.set_ylim(1e5)    
+
+    Omega_spectrum_diff = (Omega_lm_DSP - Omega_lm_M4_DSPconv).spectrum() 
+    l = np.arange(0,(LMAX_REF+1))
+    ax2.plot(l, Omega_spectrum_diff, 
+             label=('DSP - M4'))
+    ax2.set_title('|DSP-M4| Omega residual')
+    ax2.set_xlim(0,xlim)    
+    ax2.grid(True)
+
+    S_lm.plot_spectrum(ax=ax3, show=False, 
+                    legend=('M4 S_lm coeffs'))
+    A_lm.plot_spectrum(ax=ax3, show=False, 
+                    legend=('DSP A_lm coeffs'), plot_dict={'linestyle': '--'})
+    ax3.set_title('M4 & DSP S-A -coeffs')
+    ax3.set_xlim(0,xlim)    
+    ax3.set_ylim(1e-5)    
+
+    A_S_spectrum_diff =(A_lm - S_lm).spectrum()
+    l = np.arange(0,(LMAX_REF+1))
+    ax4.plot(l, A_S_spectrum_diff, 
+             label=('DSP - M4'))
+    ax4.set_title('|DSP-M4| A-S residual')
+    ax4.set_xlim(0,xlim)    
+
+    plt.tight_layout()
+    plt.grid()
+    plt.show()
     
     
     
     
 # %% TRANSFER FUNCTION IMPULSE TEST (constant Te; self-contained)
-if True:
+
+
     # ---------------------------------------------------------------------
     # Validates the FULL production solver against an independent per-degree
     # transcription of the Banerdt/DSP 5-equation system -- for BOTH closures
@@ -3630,7 +4287,7 @@ if True:
     eta_mono   = mono(eta0_i, 2*lmax_t)
     plan_t = build_or_load_gaunt(lmax_t, nu)
 
-    _sb = dict(omega_on=True, D_eta_clm=D_eta_mono,
+    _sb = dict(D_eta_clm=D_eta_mono,
                a_eta_clm=a_eta_mono, eta_clm=eta_mono)
     w_H,_,_ = solve_beuthe(impulse(R, lmax_t, amp=1.0), impulse(R, lmax_t),
                            Te_mono, D_mono, a_mono, plan_t, lmax_t, R,

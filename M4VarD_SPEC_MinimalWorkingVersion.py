@@ -50,12 +50,12 @@ import matplotlib.cm as cm
 
 nu    = 0.25
 E     = 100.0e9
-rho_l = 2900.0
+rho_l = 3200.0
 rho_c = 2900.0 
 rho_m = 3500.0
 drho = rho_m - rho_c
 drhol = rho_c - rho_l
-T_c = 50e3                 # Arbitrary crustal thickness value, TBC
+T_c = 60e3                 # Arbitrary crustal thickness value, TBC
 Te_input = 268.12e3
 
 # Top and bottom depth of density variations drho_lm
