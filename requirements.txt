@@ -5,4 +5,4 @@ matplotlib
 pyshtools
 palettable
 cmcrameri
-Displacement_strain_planet
+Displacement-strain-planet @ git+https://github.com/AB-Ares/Displacement_strain_planet.git@develop

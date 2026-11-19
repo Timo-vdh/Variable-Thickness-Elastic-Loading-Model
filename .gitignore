@@ -15,7 +15,6 @@
 !Te_twoval_builder.py
 !VarTeModel_example_runner.py
 !gaunt_cache/gaunt_plan_v5_lmax20_nu0.2500.npz
-!gaunt_cache/gaunt_plan_v5_lmax50_nu0.2500.npz
 !Elastic_Thickness_Input_Maps/grl58258-sup-0002-data_set_1.dat
 !Tectonics_data/*
 
