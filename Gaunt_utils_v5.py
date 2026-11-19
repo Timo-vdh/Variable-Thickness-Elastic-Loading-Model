@@ -26,7 +26,7 @@ def make_mode_map(lmax):
     return [(l, m) for l in range(lmax+1) for m in range(-l, l+1)]
 
 
-# %% GAUNT FUNCTIONS
+#### GAUNT FUNCTIONS ####
 # Conversion factor to go to 4pi normalization
 _sqrt4pi = np.sqrt(4.0*np.pi)
 
@@ -313,7 +313,8 @@ def selftest_gaunt(n=300, lmax_test=6, seed=0):
                 f"GAUNT MISMATCH {(lo,mo,L,M,lp,mp)}"
     print("Gaunt self-test passed.")
 
-# %% SoA FUNCTIONS
+
+#### System of Arrays (SoA) FUNCTIONS ####
 """
 SoA plan format: the Gaunt coupling plan is stored as 8 flat arrays instead of 
 millions of nested (i, j, [(L, offsets, wA, wB), ...]) objects.
@@ -703,9 +704,66 @@ def cell_sums_eta_dL(field_unstr, gidx, plan, starts, seg_len,
     return g0, g1, g2
 
 
+# ---------------------------------------------------------------------------
+#  DEGREE-1 CELLS FOR THE PLAIN CONVOLUTION MATRICES
+#
+#  _build_chunk_flat keeps a term only if W_A or W_B is non-zero. For l = 1
+#  or l' = 1 BOTH are identically zero for every L (A and B annihilate degree
+#  one, Beuthe eq 30), so the plan holds NO cell that touches a degree-1 mode.
+#  That is right for A/B, but build_conv_matrix is a PLAIN product operator,
+#  (C_X f)_lm = (X*f)_lm, and for a product those Gaunt terms are not zero.
+#  Without them every C_X has identically zero rows and columns at l = 1, so
+#  any chain that uses a product as an INTERMEDIATE (C_Te2 @ Dlap @ C_max,
+#  C_eta @ ...) drops its degree-1 part, while the grid products on the
+#  right-hand side keep it.
+#  The missing cells are few (3*(lmax+1)**2 + 3), so they are built once per
+#  lmax, kept in memory, and added here. The plan file is unchanged: no
+#  rebuild, no PLAN_VERSION bump, and the A/B/eta cell sums are untouched.
+# ---------------------------------------------------------------------------
+_DEG1_SUPPLEMENT = {}
+
+def degree1_supplement(lmax):
+    """ Gaunt terms of every cell (i, j >= i) with l_i = 1 or l_j = 1. """
+    if lmax in _DEG1_SUPPLEMENT:
+        return _DEG1_SUPPLEMENT[lmax]
+    mode_map = make_mode_map(lmax)
+    N = len(mode_map)
+    # mode_map indices 1, 2, 3 are (1,-1), (1,0), (1,1); j >= i as in the plan
+    pairs = ([(0, j) for j in (1, 2, 3)]
+             + [(i, j) for i in (1, 2, 3) for j in range(i, N)])
+    ci, cj, t_cell, t_gidx, t_q = [], [], [], [], []
+    for i, j in pairs:
+        lv, mv = mode_map[i]
+        lp, mp = mode_map[j]
+        found = False
+        for L in range(abs(lv - lp), lv + lp + 1):
+            if (lv + lp + L) % 2:
+                continue
+            q = get_real_gaunt_slice(lv, mv, L, lp, mp)
+            k = np.where(np.abs(q) > 1e-15)[0]
+            if k.size == 0:
+                continue
+            Mv  = k - L                                  # signed order M
+            off = np.where(Mv == 0, 0, np.where(Mv > 0, Mv, L + np.abs(Mv)))
+            t_gidx.append(L*L + off)                     # same as build_gidx
+            t_q.append(q[k])
+            t_cell.append(np.full(k.size, len(ci)))
+            found = True
+        if found:
+            ci.append(i)
+            cj.append(j)
+    supp = dict(ci=np.asarray(ci, np.int64), cj=np.asarray(cj, np.int64),
+                t_cell=np.concatenate(t_cell),
+                t_gidx=np.concatenate(t_gidx).astype(np.int64),
+                t_q=np.concatenate(t_q))
+    _DEG1_SUPPLEMENT[lmax] = supp
+    return supp
+
+
 def build_conv_matrix(field_unstr, gidx, gaunt_bare, starts, seg_len, ci, cj, N):
     """ C_X[i,j] = sum_{t in cell(i,j)} X[gidx_t] * gaunt_bare_t   (single field
-        spectral convolution operator, symmetric)."""
+        spectral convolution operator, symmetric), INCLUDING the degree-1
+        cells the plan does not store (see degree1_supplement)."""
     # Chunked: the direct `field_unstr[gidx] * gaunt_bare` allocated two
     # arrays of length n_terms (2 x 18.3 GB at lmax = 90) per call.
     cell = cell_sums(field_unstr, gidx, gaunt_bare, starts, seg_len)
@@ -716,19 +774,28 @@ def build_conv_matrix(field_unstr, gidx, gaunt_bare, starts, seg_len, ci, cj, N)
     C = np.zeros((N, N))
     C[ci, cj] = cell
     C[cj, ci] = cell
+    # degree-1 cells (absent from the plan). Assigned, not added: the
+    # supplement holds the COMPLETE Gaunt sum of each of these cells.
+    s = degree1_supplement(int(round(np.sqrt(N))) - 1)
+    v = np.bincount(s['t_cell'], weights=field_unstr[s['t_gidx']]*s['t_q'],
+                    minlength=s['ci'].size)
+    C[s['ci'], s['cj']] = v
+    C[s['cj'], s['ci']] = v
     return C
  
 
+_PLAN_CACHE = {}        # (lmax, nu) -> plan, kept for the whole Python session
 
 def build_or_load_gaunt(lmax, nu, nproc=16):
-    """ 
-    If a plan at the input lmax and Poisson's ratio exists in the cache 
-    directory that is set at the top of the code, then this function
-    will load it in. If it is not found, it will build it using multiple 
-    processors. Number of processors can be set manually to either speed up
-    building, or prevent overloading of computer.
     """
-    
+    Load (or build) the SoA plan once per session; later calls return the
+    in-memory copy. The arrays are made read-only so no solve can change the
+    cached plan by accident.
+    """
+    key = (int(lmax), round(float(nu), 4))
+    if key in _PLAN_CACHE:
+        return _PLAN_CACHE[key]
+
     path = os.path.join(CACHE_DIR, f"gaunt_plan_v{PLAN_VERSION}_lmax{lmax}_nu{nu:.4f}.npz")
     if os.path.exists(path):
         print(f"Start loading in SoA plan, lmax={lmax}")
@@ -737,13 +804,15 @@ def build_or_load_gaunt(lmax, nu, nproc=16):
         print(f"Loaded SoA plan lmax={lmax}: {plan['cell_i'].size:,} cells, "
               f"{plan['term_L'].size:,} terms in {time.perf_counter()-t:.2f}s")
     else:
-        print(f"Building SoA plan lmax={lmax} (parallel v2, first time)…", 
-              flush=True)
+        print(f"Building SoA plan lmax={lmax} (parallel v2, first time)…", flush=True)
         t = time.perf_counter()
         plan = build_plan_soa_parallel(lmax, nu, nproc=nproc)
         save_plan_soa(plan, lmax, nu, path)
-        print(f"  Built {plan['cell_i'].size:,} cells / "
-              f"{plan['term_L'].size:,} terms "
-              f"in {time.perf_counter()-t:.1f}s -> "
-              f"{os.path.getsize(path)/1e6:.1f} MB")
+        print(f"  Built {plan['cell_i'].size:,} cells / {plan['term_L'].size:,} terms "
+              f"in {time.perf_counter()-t:.1f}s -> {os.path.getsize(path)/1e6:.1f} MB")
+
+    for arr in plan.values():
+        # Any in-place write raises instead of corrupting the cache
+        arr.setflags(write=False)     
+    _PLAN_CACHE[key] = plan
     return plan

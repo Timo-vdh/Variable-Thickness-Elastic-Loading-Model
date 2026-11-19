@@ -62,7 +62,7 @@ def _sh_gaussian_smooth(field, sigma_deg, lmax_work):
 # ------------------------------------------------------------------ builder --
 def build_Te_indicator(w_src, lmax_grid, lmax_calc,
                        lat_range=(-50.0, 70.0), lon_range=(225.0, 290.0),
-                       sigma_deg=3.5, largest_blob=True, fill_holes=True,
+                       sigma_deg=3.5, mask_val=0.0, largest_blob=True, fill_holes=True,
                        renormalise=False):
     """
     Returns f (ndarray on the DH2 extend=False grid, values in [0,1]) and a
@@ -81,7 +81,7 @@ def build_Te_indicator(w_src, lmax_grid, lmax_calc,
 
     box = ((LAT >= lat_range[0]) & (LAT <= lat_range[1]) &
            (LON >= lon_range[0]) & (LON <= lon_range[1]))
-    mask = (w < 0.0) & box
+    mask = (w < mask_val) & box
 
     if fill_holes or largest_blob:
         from scipy import ndimage

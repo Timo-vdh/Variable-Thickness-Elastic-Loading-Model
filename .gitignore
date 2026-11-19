@@ -1,0 +1,24 @@
+# 1) Ignore everything in this folder ...
+*
+
+# 2) ... but still look inside sub-folders (their files stay ignored by rule 1)
+!*/
+
+# 3) ... and except the files that belong in the public repo
+!.gitignore
+!.gitattributes
+!README.md
+!LICENSE
+!requirements.txt
+!VarTeModel.py
+!Gaunt_utils_v5.py
+!Te_twoval_builder.py
+!VarTeModel_example_runner.py
+!gaunt_cache/gaunt_plan_v5_lmax20_nu0.2500.npz
+!gaunt_cache/gaunt_plan_v5_lmax50_nu0.2500.npz
+!Elastic_Thickness_Input_Maps/grl58258-sup-0002-data_set_1.dat
+!Tectonics_data/*
+
+# To publish a file later, add a line here, e.g.:
+# !examples/
+# !examples/*.py
